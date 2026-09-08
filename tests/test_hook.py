@@ -54,6 +54,16 @@ class HookTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(scan.call_args.kwargs["session_id"], "session-2")
 
+    def test_legacy_hook_source_is_passed_to_the_compatible_scanner(self):
+        payload = {"transcript_path": "C:/sessions/example.jsonl"}
+        with (
+            mock.patch.object(hook.scanner, "scan_transcript") as scan,
+            mock.patch.object(hook, "_generate_report"),
+        ):
+            hook.main(io.StringIO(json.dumps(payload)), error_log=self.error_log)
+
+        self.assertEqual("hook", scan.call_args.kwargs["ingest_source"])
+
     def test_invalid_input_is_logged_and_never_blocks(self):
         result = hook.main(io.StringIO("not-json"), error_log=self.error_log)
 
@@ -88,6 +98,23 @@ class HookTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("OSError: dashboard unavailable", self.error_log.read_text(encoding="utf-8"))
+
+    def test_custom_database_and_output_are_used_by_hook(self):
+        payload = {"transcript_path": "C:/sessions/example.jsonl"}
+        database = Path(self.temp_dir.name) / "custom.sqlite"
+        output = Path(self.temp_dir.name) / "custom.html"
+        with (
+            mock.patch.object(hook.scanner, "scan_transcript") as scan,
+            mock.patch("report.generate_report") as report,
+        ):
+            result = hook.main(
+                io.StringIO(json.dumps(payload)), error_log=self.error_log,
+                db_path=database, output_path=output,
+            )
+
+        self.assertEqual(0, result)
+        self.assertEqual(database, scan.call_args.kwargs["db_path"])
+        report.assert_called_once_with(database, output)
 
 
 if __name__ == "__main__":

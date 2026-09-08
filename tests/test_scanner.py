@@ -4,8 +4,10 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import scanner
+from adapters.codex import CodexAdapter
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -157,8 +159,8 @@ class ScannerTestCase(unittest.TestCase):
         connection = sqlite3.connect(self.db_path)
         try:
             offset = connection.execute(
-                "SELECT byte_offset FROM scan_state WHERE transcript_path = ?",
-                (str(transcript.resolve()),),
+                "SELECT byte_offset FROM scan_state WHERE platform = ? AND source_path = ?",
+                ("codex", str(transcript.resolve())),
             ).fetchone()[0]
         finally:
             connection.close()
@@ -215,7 +217,7 @@ class ScannerTestCase(unittest.TestCase):
             cwd=self.project_root,
         )
 
-        row = self.rows("SELECT skill_path, skill_name FROM skills")[0]
+        row = self.rows("SELECT skill_path, skill_name FROM installed_skills")[0]
         self.assertEqual(os.path.normcase(str(skill.resolve())), row["skill_path"])
         self.assertEqual("local-skill", row["skill_name"])
 
@@ -423,6 +425,64 @@ class ScannerTestCase(unittest.TestCase):
         self.assertEqual(1, first.inserted)
         self.assertEqual(0, second.inserted)
         self.assertEqual(1, self.rows("SELECT COUNT(*) AS count FROM invocations")[0]["count"])
+
+    def test_codex_adapter_uses_environment_root_and_only_current_plugin_version(self):
+        codex_home = self.root / "codex-home"
+        agents_home = self.root / "agents-home"
+        transcript = codex_home / "sessions" / "nested" / "session.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("", encoding="utf-8")
+        self._write_skill(codex_home / "skills" / "alpha" / "SKILL.md", "Alpha")
+        self._write_skill(agents_home / "skills" / "beta" / "SKILL.md", "Beta")
+        plugin = codex_home / "plugins" / "cache" / "market" / "plugin"
+        self._write_skill(plugin / "1.0" / "skills" / "old" / "SKILL.md", "Old")
+        self._write_skill(plugin / "2.0" / "skills" / "current" / "SKILL.md", "Current")
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            adapter = CodexAdapter(agents_home=agents_home, db_path=self.db_path)
+
+        self.assertEqual(codex_home.resolve(), adapter.resolved_root)
+        self.assertEqual([transcript], adapter.discover_transcripts())
+        self.assertEqual(
+            {"Alpha", "Beta", "Current"},
+            {skill.skill_name for skill in adapter.discover_installed_skills()},
+        )
+
+    def test_codex_adapter_keeps_partial_status_after_failure_then_success(self):
+        codex_home = self.root / "codex-home"
+        sessions = codex_home / "sessions"
+        sessions.mkdir(parents=True)
+        exploding = sessions / "a-exploding.jsonl"
+        damaged = sessions / "b-damaged.jsonl"
+        successful = sessions / "c-successful.jsonl"
+        exploding.write_text("ignored\n", encoding="utf-8")
+        damaged.write_text("{broken}\n", encoding="utf-8")
+        successful.write_text(
+            json.dumps(self._event("successful", "turn-1", f"cat '{self.alpha}'")) + "\n",
+            encoding="utf-8",
+        )
+        original_scan = scanner.scan_transcript
+
+        def fail_one(path, *args, **kwargs):
+            if Path(path) == exploding:
+                raise OSError("injected file failure")
+            return original_scan(path, *args, **kwargs)
+
+        adapter = CodexAdapter(codex_home=codex_home, db_path=self.db_path)
+        with mock.patch.object(scanner, "scan_transcript", side_effect=fail_one):
+            result = adapter.scan()
+
+        self.assertEqual(1, result.failures)
+        self.assertEqual(1, result.parse_errors)
+        status = self.rows(
+            "SELECT status FROM platform_status WHERE platform = 'codex'"
+        )[0]["status"]
+        self.assertEqual("partial", status)
+
+    @staticmethod
+    def _write_skill(path, name):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\nname: {name}\n---\n", encoding="utf-8")
 
     @staticmethod
     def _event(session_id, turn_id, command, workdir=None):

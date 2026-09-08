@@ -8,11 +8,13 @@ import json
 import os
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import unquote, urlparse
+
+from adapters.base import EVIDENCE_PRIORITY, InstalledSkill, Invocation, canonical_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -58,6 +60,8 @@ class ScanResult:
     duplicates: int = 0
     parse_errors: int = 0
     retained_bytes: int = 0
+    upgraded: int = 0
+    failures: int = 0
 
     def __add__(self, other: "ScanResult") -> "ScanResult":
         return ScanResult(
@@ -67,6 +71,8 @@ class ScanResult:
             duplicates=self.duplicates + other.duplicates,
             parse_errors=self.parse_errors + other.parse_errors,
             retained_bytes=self.retained_bytes + other.retained_bytes,
+            upgraded=self.upgraded + other.upgraded,
+            failures=self.failures + other.failures,
         )
 
 
@@ -74,72 +80,176 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def init_db(db_path: str | os.PathLike[str] = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    """Create the analytics schema and return an open SQLite connection."""
-    path = Path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=2.0)
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS skills (
-            skill_path TEXT PRIMARY KEY,
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return bool(
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+    )
+
+
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
+
+
+def _create_schema(connection: sqlite3.Connection) -> None:
+    statements = (
+        """CREATE TABLE IF NOT EXISTS installed_skills (
+            platform TEXT NOT NULL,
+            skill_key TEXT NOT NULL,
             skill_name TEXT NOT NULL,
+            skill_path TEXT,
             skill_source TEXT NOT NULL,
             first_seen_at TEXT NOT NULL,
-            last_seen_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS invocations (
+            last_seen_at TEXT NOT NULL,
+            PRIMARY KEY (platform, skill_key)
+        )""",
+        """CREATE TABLE IF NOT EXISTS invocations (
+            platform TEXT NOT NULL,
             session_id TEXT NOT NULL,
             turn_id TEXT NOT NULL,
-            skill_path TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            skill_path TEXT,
+            skill_key TEXT NOT NULL,
+            evidence_type TEXT NOT NULL CHECK (
+                evidence_type IN ('structured_skill', 'slash_skill', 'skill_file_read')
+            ),
             invoked_at TEXT NOT NULL,
             cwd TEXT,
             agent_kind TEXT NOT NULL CHECK (agent_kind IN ('main', 'subagent', 'unknown')),
             model TEXT,
-            ingest_source TEXT NOT NULL CHECK (ingest_source IN ('history', 'hook')),
-            UNIQUE (session_id, turn_id, skill_path),
-            FOREIGN KEY (skill_path) REFERENCES skills(skill_path)
-        );
-
-        CREATE TABLE IF NOT EXISTS scan_state (
-            transcript_path TEXT PRIMARY KEY,
+            ingest_source TEXT NOT NULL CHECK (ingest_source IN ('history', 'realtime')),
+            PRIMARY KEY (platform, session_id, turn_id, skill_key)
+        )""",
+        """CREATE TABLE IF NOT EXISTS scan_state (
+            platform TEXT NOT NULL,
+            source_path TEXT NOT NULL,
             byte_offset INTEGER NOT NULL,
             file_size INTEGER NOT NULL,
             file_mtime INTEGER NOT NULL,
             cursor_fingerprint TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS diagnostics (
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (platform, source_path)
+        )""",
+        """CREATE TABLE IF NOT EXISTS diagnostics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            transcript_path TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            source_path TEXT NOT NULL,
             byte_offset INTEGER NOT NULL,
             line_number INTEGER,
             event_type TEXT,
             category TEXT NOT NULL,
             detail TEXT NOT NULL,
+            adapter_version TEXT,
+            format_version TEXT,
             created_at TEXT NOT NULL,
-            UNIQUE (transcript_path, byte_offset, category)
-        );
-
-        CREATE INDEX IF NOT EXISTS invocations_invoked_at_idx
-            ON invocations(invoked_at);
-        CREATE INDEX IF NOT EXISTS invocations_skill_path_idx
-            ON invocations(skill_path);
-        CREATE INDEX IF NOT EXISTS diagnostics_category_idx
-            ON diagnostics(category);
-        """
+            UNIQUE (platform, source_path, byte_offset, category)
+        )""",
+        """CREATE TABLE IF NOT EXISTS platform_status (
+            platform TEXT PRIMARY KEY,
+            status TEXT NOT NULL CHECK (status IN (
+                'ready', 'not_installed', 'unsupported_version', 'partial', 'integration_error'
+            )),
+            resolved_root TEXT,
+            last_history_scan_at TEXT,
+            last_realtime_at TEXT,
+            adapter_version TEXT,
+            format_version TEXT,
+            updated_at TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS invocations_invoked_at_idx ON invocations(invoked_at)",
+        "CREATE INDEX IF NOT EXISTS invocations_skill_path_idx ON invocations(skill_path)",
+        "CREATE INDEX IF NOT EXISTS diagnostics_category_idx ON diagnostics(category)",
     )
-    scan_state_columns = {
-        row[1] for row in connection.execute("PRAGMA table_info(scan_state)")
-    }
-    if "cursor_fingerprint" not in scan_state_columns:
-        connection.execute(
-            "ALTER TABLE scan_state ADD COLUMN cursor_fingerprint TEXT NOT NULL DEFAULT ''"
+    for statement in statements:
+        connection.execute(statement)
+
+
+def _validate_migration(connection: sqlite3.Connection, expected_invocations: int) -> None:
+    migrated = connection.execute("SELECT COUNT(*) FROM invocations").fetchone()[0]
+    if migrated != expected_invocations:
+        raise sqlite3.IntegrityError(
+            f"invocation migration count changed: {expected_invocations} -> {migrated}"
         )
-    connection.commit()
+
+
+def _migrate_legacy_schema(connection: sqlite3.Connection) -> None:
+    old_invocation_count = connection.execute("SELECT COUNT(*) FROM invocations").fetchone()[0]
+    legacy_tables = tuple(
+        table for table in ("skills", "invocations", "scan_state", "diagnostics")
+        if _table_exists(connection, table)
+    )
+    for table in legacy_tables:
+        connection.execute(f'ALTER TABLE "{table}" RENAME TO "legacy_{table}"')
+    _create_schema(connection)
+
+    if "skills" in legacy_tables:
+        connection.execute(
+            """INSERT INTO installed_skills
+                (platform, skill_key, skill_name, skill_path, skill_source,
+                 first_seen_at, last_seen_at)
+            SELECT 'codex', skill_path, skill_name, skill_path, skill_source,
+                   first_seen_at, last_seen_at
+            FROM legacy_skills"""
+        )
+    connection.execute(
+        """INSERT INTO invocations
+            (platform, session_id, turn_id, skill_name, skill_path, skill_key,
+             evidence_type, invoked_at, cwd, agent_kind, model, ingest_source)
+        SELECT 'codex', i.session_id, i.turn_id, s.skill_name, i.skill_path, i.skill_path,
+               'skill_file_read', i.invoked_at, i.cwd, i.agent_kind, i.model,
+               CASE i.ingest_source WHEN 'hook' THEN 'realtime' ELSE 'history' END
+        FROM legacy_invocations AS i
+        JOIN legacy_skills AS s ON s.skill_path = i.skill_path"""
+    )
+    if "scan_state" in legacy_tables:
+        scan_columns = _columns(connection, "legacy_scan_state")
+        fingerprint = "cursor_fingerprint" if "cursor_fingerprint" in scan_columns else "''"
+        connection.execute(
+            f"""INSERT INTO scan_state
+                (platform, source_path, byte_offset, file_size, file_mtime,
+                 cursor_fingerprint, updated_at)
+            SELECT 'codex', transcript_path, byte_offset, file_size, file_mtime,
+                   {fingerprint}, updated_at
+            FROM legacy_scan_state"""
+        )
+    if "diagnostics" in legacy_tables:
+        connection.execute(
+            """INSERT INTO diagnostics
+                (platform, source_path, byte_offset, line_number, event_type, category,
+                 detail, adapter_version, format_version, created_at)
+            SELECT 'codex', transcript_path, byte_offset, line_number, event_type, category,
+                   detail, 'legacy', 'legacy', created_at
+            FROM legacy_diagnostics"""
+        )
+
+    _validate_migration(connection, old_invocation_count)
+    for table in ("invocations", "skills", "scan_state", "diagnostics"):
+        if table in legacy_tables:
+            connection.execute(f'DROP TABLE "legacy_{table}"')
+    _create_schema(connection)
+
+
+def init_db(db_path: str | os.PathLike[str] = DEFAULT_DB_PATH) -> sqlite3.Connection:
+    """Create or atomically migrate the analytics schema and return a connection."""
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=2.0)
+    connection.execute("PRAGMA foreign_keys = ON")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        if _table_exists(connection, "invocations") and "platform" not in _columns(
+            connection, "invocations"
+        ):
+            _migrate_legacy_schema(connection)
+        else:
+            _create_schema(connection)
+        connection.execute("PRAGMA user_version = 2")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        connection.close()
+        raise
     return connection
 
 
@@ -578,6 +688,361 @@ def _skill_metadata(skill_path: str) -> tuple[str, str]:
     return name, source
 
 
+def upsert_installed_skill(
+    connection: sqlite3.Connection, skill: InstalledSkill
+) -> None:
+    path = canonical_path(skill.skill_path) if skill.skill_path else None
+    key = path or skill.skill_key or f"name:{skill.skill_name.casefold()}"
+    connection.execute(
+        """INSERT INTO installed_skills
+            (platform, skill_key, skill_name, skill_path, skill_source,
+             first_seen_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(platform, skill_key) DO UPDATE SET
+            skill_name = excluded.skill_name,
+            skill_path = excluded.skill_path,
+            skill_source = excluded.skill_source,
+            first_seen_at = MIN(installed_skills.first_seen_at, excluded.first_seen_at),
+            last_seen_at = MAX(installed_skills.last_seen_at, excluded.last_seen_at)""",
+        (
+            skill.platform,
+            key,
+            skill.skill_name,
+            path,
+            skill.skill_source,
+            skill.first_seen_at,
+            skill.last_seen_at,
+        ),
+    )
+
+
+def store_installed_skills(
+    skills: Iterable[InstalledSkill],
+    db_path: str | os.PathLike[str] = DEFAULT_DB_PATH,
+) -> None:
+    """Store platform discovery results without removing historical mappings."""
+    connection = init_db(db_path)
+    try:
+        for skill in skills:
+            upsert_installed_skill(connection, skill)
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def replace_installed_skills(
+    platform: str,
+    skills: Iterable[InstalledSkill],
+    db_path: str | os.PathLike[str] = DEFAULT_DB_PATH,
+    *,
+    complete: bool,
+) -> None:
+    """Atomically refresh inventory, pruning stale rows only after a complete discovery."""
+    current = list(skills)
+    if any(skill.platform != platform for skill in current):
+        raise ValueError("all installed Skills must belong to the replaced platform")
+    current_keys = [
+        canonical_path(skill.skill_path)
+        if skill.skill_path
+        else skill.skill_key or f"name:{skill.skill_name.casefold()}"
+        for skill in current
+    ]
+    connection = init_db(db_path)
+    try:
+        for skill in current:
+            upsert_installed_skill(connection, skill)
+        if complete:
+            if current_keys:
+                placeholders = ", ".join("?" for _ in current_keys)
+                connection.execute(
+                    f"DELETE FROM installed_skills WHERE platform = ? "
+                    f"AND skill_key NOT IN ({placeholders})",
+                    (platform, *current_keys),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM installed_skills WHERE platform = ?", (platform,)
+                )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _write_platform_status(
+    connection: sqlite3.Connection,
+    platform: str,
+    status: str,
+    resolved_root: str | os.PathLike[str] | None,
+    last_history_scan_at: str | None,
+    last_realtime_at: str | None,
+    adapter_version: str | None,
+    format_version: str | None,
+) -> None:
+    connection.execute(
+        """INSERT INTO platform_status
+            (platform, status, resolved_root, last_history_scan_at, last_realtime_at,
+             adapter_version, format_version, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(platform) DO UPDATE SET
+            status = excluded.status,
+            resolved_root = COALESCE(excluded.resolved_root, platform_status.resolved_root),
+            last_history_scan_at = COALESCE(
+                excluded.last_history_scan_at, platform_status.last_history_scan_at
+            ),
+            last_realtime_at = COALESCE(
+                excluded.last_realtime_at, platform_status.last_realtime_at
+            ),
+            adapter_version = COALESCE(
+                excluded.adapter_version, platform_status.adapter_version
+            ),
+            format_version = COALESCE(
+                excluded.format_version, platform_status.format_version
+            ),
+            updated_at = excluded.updated_at""",
+        (
+            platform,
+            status,
+            str(resolved_root) if resolved_root is not None else None,
+            last_history_scan_at,
+            last_realtime_at,
+            adapter_version,
+            format_version,
+            _utc_now(),
+        ),
+    )
+
+
+def update_platform_status(
+    platform: str,
+    status: str,
+    *,
+    db_path: str | os.PathLike[str] = DEFAULT_DB_PATH,
+    resolved_root: str | os.PathLike[str] | None = None,
+    last_history_scan_at: str | None = None,
+    last_realtime_at: str | None = None,
+    adapter_version: str | None = None,
+    format_version: str | None = None,
+) -> None:
+    """Persist one platform's latest independent discovery or scan status."""
+    connection = init_db(db_path)
+    try:
+        _write_platform_status(
+            connection,
+            platform,
+            status,
+            resolved_root,
+            last_history_scan_at,
+            last_realtime_at,
+            adapter_version,
+            format_version,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _normalized_invocation(
+    connection: sqlite3.Connection, invocation: Invocation
+) -> Invocation:
+    if invocation.evidence_type not in EVIDENCE_PRIORITY:
+        raise ValueError(f"unknown evidence type: {invocation.evidence_type}")
+    if invocation.agent_kind not in {"main", "subagent", "unknown"}:
+        raise ValueError(f"unknown agent kind: {invocation.agent_kind}")
+    if not invocation.skill_name.strip():
+        raise ValueError("skill_name must not be empty")
+
+    path = canonical_path(invocation.skill_path) if invocation.skill_path else None
+    key = path
+    if key is None:
+        matches = [
+            row[:2]
+            for row in connection.execute(
+                """SELECT skill_key, skill_path, skill_name FROM installed_skills
+                   WHERE platform = ?""",
+                (invocation.platform,),
+            )
+            if str(row[2]).casefold() == invocation.skill_name.casefold()
+        ]
+        if len(matches) == 1:
+            key, path = str(matches[0][0]), matches[0][1]
+        else:
+            key = f"name:{invocation.skill_name.casefold()}"
+            if len(matches) > 1:
+                _diagnose(
+                    connection,
+                    f"invocation:{invocation.session_id}:{invocation.turn_id}",
+                    0,
+                    0,
+                    invocation.evidence_type,
+                    "ambiguous_skill_identity",
+                    "multiple installed Skills have the same case-folded name",
+                    platform=invocation.platform,
+                )
+
+    source = "realtime" if invocation.ingest_source == "hook" else invocation.ingest_source
+    if source not in {"history", "realtime"}:
+        raise ValueError(f"unknown ingest source: {invocation.ingest_source}")
+    return Invocation(
+        platform=invocation.platform,
+        session_id=invocation.session_id,
+        turn_id=invocation.turn_id,
+        skill_name=invocation.skill_name,
+        skill_path=str(path) if path is not None else None,
+        skill_key=str(key),
+        evidence_type=invocation.evidence_type,
+        invoked_at=invocation.invoked_at,
+        cwd=invocation.cwd,
+        agent_kind=invocation.agent_kind,
+        model=invocation.model,
+        ingest_source=source,
+    )
+
+
+def ingest_invocation(
+    connection: sqlite3.Connection, invocation: Invocation
+) -> str:
+    """Insert, upgrade, or deduplicate one normalized invocation."""
+    invocation = _normalized_invocation(connection, invocation)
+    same_turn = connection.execute(
+        """SELECT skill_key, skill_name, skill_path, evidence_type, invoked_at, cwd,
+                  agent_kind, model, ingest_source
+           FROM invocations
+           WHERE platform = ? AND session_id = ? AND turn_id = ?""",
+        (invocation.platform, invocation.session_id, invocation.turn_id),
+    ).fetchall()
+    matching_paths = {
+        row[0]: row[2]
+        for row in same_turn
+        if row[2] and str(row[1]).casefold() == invocation.skill_name.casefold()
+    }
+    if invocation.skill_path is None and len(matching_paths) == 1:
+        key, path = next(iter(matching_paths.items()))
+        invocation = replace(invocation, skill_key=str(key), skill_path=str(path))
+
+    if invocation.skill_path:
+        fallback_key = f"name:{invocation.skill_name.casefold()}"
+        target = next((row for row in same_turn if row[0] == invocation.skill_key), None)
+        fallback = next((row for row in same_turn if row[0] == fallback_key), None)
+        if target is not None and fallback is not None and target[0] != fallback[0]:
+            if EVIDENCE_PRIORITY[fallback[3]] > EVIDENCE_PRIORITY[target[3]]:
+                connection.execute(
+                    """UPDATE invocations
+                       SET skill_name = ?, evidence_type = ?, invoked_at = ?,
+                           cwd = COALESCE(?, cwd), agent_kind = ?,
+                           model = COALESCE(?, model), ingest_source = ?
+                       WHERE platform = ? AND session_id = ? AND turn_id = ? AND skill_key = ?""",
+                    (
+                        fallback[1], fallback[3], fallback[4], fallback[5], fallback[6],
+                        fallback[7], fallback[8], invocation.platform, invocation.session_id,
+                        invocation.turn_id, invocation.skill_key,
+                    ),
+                )
+            connection.execute(
+                """DELETE FROM invocations
+                   WHERE platform = ? AND session_id = ? AND turn_id = ? AND skill_key = ?""",
+                (
+                    invocation.platform,
+                    invocation.session_id,
+                    invocation.turn_id,
+                    fallback_key,
+                ),
+            )
+        connection.execute(
+            """UPDATE OR IGNORE invocations
+               SET skill_key = ?, skill_path = ?, skill_name = ?
+               WHERE platform = ? AND session_id = ? AND turn_id = ? AND skill_key = ?""",
+            (
+                invocation.skill_key,
+                invocation.skill_path,
+                invocation.skill_name,
+                invocation.platform,
+                invocation.session_id,
+                invocation.turn_id,
+                fallback_key,
+            ),
+        )
+    key = (
+        invocation.platform,
+        invocation.session_id,
+        invocation.turn_id,
+        invocation.skill_key,
+    )
+    cursor = connection.execute(
+        """INSERT OR IGNORE INTO invocations
+            (platform, session_id, turn_id, skill_name, skill_path, skill_key,
+             evidence_type, invoked_at, cwd, agent_kind, model, ingest_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            invocation.platform,
+            invocation.session_id,
+            invocation.turn_id,
+            invocation.skill_name,
+            invocation.skill_path,
+            invocation.skill_key,
+            invocation.evidence_type,
+            invocation.invoked_at,
+            invocation.cwd,
+            invocation.agent_kind,
+            invocation.model,
+            invocation.ingest_source,
+        ),
+    )
+    if cursor.rowcount == 1:
+        return "inserted"
+    cursor = connection.execute(
+        """UPDATE invocations
+           SET skill_name = ?, skill_path = COALESCE(?, skill_path), evidence_type = ?,
+               cwd = COALESCE(?, cwd), agent_kind = ?, model = COALESCE(?, model),
+               ingest_source = ?
+           WHERE platform = ? AND session_id = ? AND turn_id = ? AND skill_key = ?
+             AND CASE evidence_type
+                   WHEN 'structured_skill' THEN 3
+                   WHEN 'slash_skill' THEN 2
+                   ELSE 1
+                 END < ?""",
+        (
+            invocation.skill_name,
+            invocation.skill_path,
+            invocation.evidence_type,
+            invocation.cwd,
+            invocation.agent_kind,
+            invocation.model,
+            invocation.ingest_source,
+            *key,
+            EVIDENCE_PRIORITY[invocation.evidence_type],
+        ),
+    )
+    return "upgraded" if cursor.rowcount == 1 else "duplicate"
+
+
+def store_invocations(
+    invocations: Iterable[Invocation],
+    db_path: str | os.PathLike[str] = DEFAULT_DB_PATH,
+) -> ScanResult:
+    """Atomically store a batch emitted by any platform adapter."""
+    connection = init_db(db_path)
+    inserted = duplicates = upgraded = 0
+    try:
+        for invocation in invocations:
+            outcome = ingest_invocation(connection, invocation)
+            inserted += outcome == "inserted"
+            duplicates += outcome == "duplicate"
+            upgraded += outcome == "upgraded"
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return ScanResult(inserted=inserted, duplicates=duplicates, upgraded=upgraded)
+
+
 def _diagnose(
     connection: sqlite3.Connection,
     transcript_path: str,
@@ -586,20 +1051,28 @@ def _diagnose(
     event_type: str | None,
     category: str,
     detail: str,
+    *,
+    platform: str = "codex",
+    adapter_version: str | None = "1",
+    format_version: str | None = "response_item/custom_tool_call/exec",
 ) -> None:
     connection.execute(
         """
         INSERT OR IGNORE INTO diagnostics
-            (transcript_path, byte_offset, line_number, event_type, category, detail, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (platform, source_path, byte_offset, line_number, event_type, category, detail,
+             adapter_version, format_version, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            platform,
             transcript_path,
             byte_offset,
             line_number,
             event_type,
             category,
             detail[:300],
+            adapter_version,
+            format_version,
             _utc_now(),
         ),
     )
@@ -660,7 +1133,7 @@ def scan_transcript(
         state = connection.execute(
             """
             SELECT byte_offset, file_size, file_mtime, cursor_fingerprint
-            FROM scan_state WHERE transcript_path = ?
+            FROM scan_state WHERE platform = 'codex' AND source_path = ?
             """,
             (transcript_key,),
         ).fetchone()
@@ -765,38 +1238,36 @@ def scan_transcript(
 
             for skill_path in paths:
                 skill_name, skill_source = _skill_metadata(skill_path)
-                connection.execute(
-                    """
-                    INSERT INTO skills
-                        (skill_path, skill_name, skill_source, first_seen_at, last_seen_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(skill_path) DO UPDATE SET
-                        skill_name = excluded.skill_name,
-                        skill_source = excluded.skill_source,
-                        first_seen_at = MIN(skills.first_seen_at, excluded.first_seen_at),
-                        last_seen_at = MAX(skills.last_seen_at, excluded.last_seen_at)
-                    """,
-                    (skill_path, skill_name, skill_source, invoked_at, invoked_at),
-                )
-                cursor = connection.execute(
-                    """
-                    INSERT OR IGNORE INTO invocations
-                        (session_id, turn_id, skill_path, invoked_at, cwd,
-                         agent_kind, model, ingest_source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        current_session,
-                        current_turn,
-                        skill_path,
-                        invoked_at,
-                        context.get("cwd"),
-                        current_kind,
-                        context.get("model"),
-                        ingest_source,
+                upsert_installed_skill(
+                    connection,
+                    InstalledSkill(
+                        platform="codex",
+                        skill_key=skill_path,
+                        skill_name=skill_name,
+                        skill_path=skill_path,
+                        skill_source=skill_source,
+                        first_seen_at=invoked_at,
+                        last_seen_at=invoked_at,
                     ),
                 )
-                if cursor.rowcount == 1:
+                outcome = ingest_invocation(
+                    connection,
+                    Invocation(
+                        platform="codex",
+                        session_id=current_session,
+                        turn_id=current_turn,
+                        skill_name=skill_name,
+                        skill_path=skill_path,
+                        skill_key=skill_path,
+                        evidence_type="skill_file_read",
+                        invoked_at=invoked_at,
+                        cwd=context.get("cwd"),
+                        agent_kind=current_kind,
+                        model=context.get("model"),
+                        ingest_source=ingest_source,
+                    ),
+                )
+                if outcome == "inserted":
                     inserted += 1
                 else:
                     duplicates += 1
@@ -805,10 +1276,10 @@ def scan_transcript(
         connection.execute(
             """
             INSERT INTO scan_state
-                (transcript_path, byte_offset, file_size, file_mtime,
+                (platform, source_path, byte_offset, file_size, file_mtime,
                  cursor_fingerprint, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(transcript_path) DO UPDATE SET
+            VALUES ('codex', ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(platform, source_path) DO UPDATE SET
                 byte_offset = excluded.byte_offset,
                 file_size = excluded.file_size,
                 file_mtime = excluded.file_mtime,
@@ -823,6 +1294,17 @@ def scan_transcript(
                 _cursor_fingerprint(path, new_offset),
                 _utc_now(),
             ),
+        )
+        now = _utc_now()
+        _write_platform_status(
+            connection,
+            "codex",
+            "partial" if parse_errors else "ready",
+            None,
+            now if ingest_source == "history" else None,
+            now if ingest_source == "hook" else None,
+            "1",
+            "response_item/custom_tool_call/exec",
         )
         connection.commit()
         return ScanResult(
@@ -865,7 +1347,23 @@ def backfill(
                 connection.commit()
             finally:
                 connection.close()
-            result += ScanResult(files=1)
+            result += ScanResult(files=1, failures=1)
+    now = _utc_now()
+    connection = init_db(db_path)
+    try:
+        _write_platform_status(
+            connection,
+            "codex",
+            "partial" if result.failures or result.parse_errors else "ready",
+            home.resolve(strict=False),
+            now,
+            None,
+            "1",
+            "response_item/custom_tool_call/exec",
+        )
+        connection.commit()
+    finally:
+        connection.close()
     return result
 
 

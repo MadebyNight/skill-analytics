@@ -4,294 +4,159 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>Codex Skill Analytics</title>
+  <title>Skill Analytics</title>
   <style>
     :root {
-      --ink: #eef4ff;
-      --muted: #8993a7;
-      --line: rgba(255, 255, 255, .1);
-      --panel: rgba(11, 16, 31, .78);
-      --lime: #b8f34a;
-      --blue: #6ea8ff;
-      --violet: #9b87f5;
-      --orange: #ff9d66;
+      --bg: #07090d; --panel: #0e1219; --raised: #151b25; --ink: #f1f5f9;
+      --muted: #8993a4; --line: rgba(255,255,255,.1); --acid: #c7ff52;
+      --codex: #79e6bd; --claude: #f1a56b; --opencode: #70a6ff; --pi: #bd89ff;
     }
-
     * { box-sizing: border-box; }
-    html { background: #060912; color: var(--ink); font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-    body { margin: 0; min-width: 300px; background: radial-gradient(circle at 85% 0, rgba(110, 168, 255, .13), transparent 31rem), #060912; }
-    body::before { content: ""; position: fixed; inset: 0; pointer-events: none; opacity: .22; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 52px 52px; mask-image: linear-gradient(to bottom, black, transparent 72%); }
-    main { position: relative; width: min(1440px, calc(100% - 40px)); margin: auto; padding: 58px 0 80px; }
-    header { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 28px; margin-bottom: 42px; }
-    .eyebrow, h2 span { color: var(--lime); font: 700 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .18em; text-transform: uppercase; }
-    h1 { max-width: 900px; margin: 12px 0 0; font-size: clamp(42px, 7.5vw, 112px); font-weight: 620; line-height: .84; letter-spacing: -.075em; }
-    h1 i { color: var(--lime); font-style: normal; }
-    .timestamp { color: var(--muted); font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; }
-    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); border-radius: 22px; overflow: hidden; background: var(--panel); backdrop-filter: blur(16px); }
-    .metric { min-height: 156px; padding: 24px; border-right: 1px solid var(--line); display: flex; flex-direction: column; justify-content: space-between; }
+    html { background: var(--bg); color: var(--ink); font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; min-width: 320px; background: radial-gradient(circle at 75% -10%, #1b2936 0, transparent 34rem); }
+    body::before { content: ""; position: fixed; inset: 0; pointer-events: none; opacity: .18; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 60px 60px; mask-image: linear-gradient(#000, transparent 70%); }
+    main { position: relative; width: min(1480px, calc(100% - 44px)); margin: auto; padding: 40px 0 80px; }
+    header { display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: end; min-height: 280px; }
+    .eyebrow, .index, th { color: var(--acid); font: 700 10px/1.2 ui-monospace, monospace; letter-spacing: .18em; text-transform: uppercase; }
+    h1 { margin: 16px 0 0; max-width: 950px; font-size: clamp(58px, 10vw, 150px); font-weight: 560; line-height: .76; letter-spacing: -.085em; }
+    h1 span { color: transparent; -webkit-text-stroke: 1px #768094; }
+    .controls { display: grid; gap: 12px; justify-items: end; }
+    .timestamp { color: var(--muted); font: 11px/1.5 ui-monospace, monospace; text-align: right; }
+    select { appearance: none; min-width: 190px; padding: 12px 42px 12px 16px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--raised); font: 600 12px inherit; background-image: linear-gradient(45deg, transparent 50%, var(--acid) 50%), linear-gradient(135deg, var(--acid) 50%, transparent 50%); background-position: calc(100% - 17px) 17px, calc(100% - 12px) 17px; background-size: 5px 5px; background-repeat: no-repeat; }
+    select:focus-visible { outline: 2px solid var(--acid); outline-offset: 3px; }
+    .metrics { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 34px; border: 1px solid var(--line); border-radius: 24px; overflow: hidden; background: rgba(14,18,25,.8); }
+    .metric { min-height: 142px; padding: 22px; border-right: 1px solid var(--line); display: flex; flex-direction: column; justify-content: space-between; }
     .metric:last-child { border: 0; }
-    .metric span, .section-copy, small { color: var(--muted); }
-    .metric strong { font-size: clamp(42px, 5vw, 72px); font-weight: 500; line-height: 1; letter-spacing: -.06em; }
-    section { margin-top: 72px; }
-    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
-    h2 { margin: 0; font-size: clamp(25px, 3vw, 42px); font-weight: 520; letter-spacing: -.04em; }
-    h2 span { display: block; margin-bottom: 8px; }
-    .section-copy { max-width: 48ch; margin: 0; font-size: 13px; }
-    .panel { border: 1px solid var(--line); border-radius: 22px; background: var(--panel); overflow: hidden; }
-    .heatmap-wrap { overflow-x: auto; padding: 28px; }
-    .heatmap { display: grid; grid-template-rows: repeat(7, 11px); grid-auto-flow: column; grid-auto-columns: 11px; gap: 5px; width: max-content; min-width: 100%; }
-    .day { width: 11px; height: 11px; border-radius: 2px; background: rgba(255,255,255,.065); }
-    .day[data-level="1"] { background: rgba(184,243,74,.3); }
-    .day[data-level="2"] { background: rgba(184,243,74,.52); }
-    .day[data-level="3"] { background: rgba(184,243,74,.75); }
-    .day[data-level="4"] { background: var(--lime); box-shadow: 0 0 14px rgba(184,243,74,.36); }
-    .chart-grid { display: grid; grid-template-columns: 1.55fr 1fr; gap: 18px; }
-    .chart { min-height: 310px; padding: 26px; display: flex; flex-direction: column; }
-    .chart-bars { flex: 1; display: flex; align-items: end; gap: 8px; padding-top: 28px; }
-    .bar-slot { flex: 1; height: 220px; min-width: 12px; display: flex; flex-direction: column; justify-content: end; gap: 9px; color: var(--muted); font: 9px ui-monospace, monospace; text-align: center; }
-    .bar { position: relative; min-height: 2px; border-radius: 5px 5px 2px 2px; background: linear-gradient(to top, var(--blue), var(--violet)); transition: height .25s ease; }
-    .bar em { position: absolute; left: 50%; top: -18px; transform: translateX(-50%); color: var(--ink); font-style: normal; }
-    .month .bar { background: linear-gradient(to top, #3868b7, var(--lime)); }
-    .month .bar-slot { height: 200px; }
-    .month-meta { min-height: 22px; color: var(--muted); font-size: 8px; line-height: 1.35; }
-    .chart-legend { display: flex; gap: 12px; color: var(--muted); font-size: 9px; }
-    .filters { display: flex; gap: 10px; flex-wrap: wrap; }
-    select { appearance: none; color: var(--ink); background: #101628; border: 1px solid var(--line); border-radius: 999px; padding: 9px 34px 9px 14px; font: inherit; font-size: 12px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 14px) 14px, calc(100% - 10px) 14px; background-size: 4px 4px; background-repeat: no-repeat; }
-    select:focus-visible { outline: 2px solid var(--lime); outline-offset: 3px; }
-    .split { display: grid; grid-template-columns: 1.25fr .75fr; gap: 18px; }
-    .agent-list, .cwd-list { display: grid; padding: 24px; gap: 18px; }
-    .agent-row, .cwd-row { display: grid; grid-template-columns: minmax(90px, auto) 1fr auto; align-items: center; gap: 14px; }
-    .track { height: 5px; border-radius: 4px; overflow: hidden; background: rgba(255,255,255,.07); }
-    .track i { display: block; height: 100%; border-radius: inherit; background: var(--blue); }
-    .cwd-row code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .table-wrap { overflow: auto; }
-    table { border-collapse: collapse; width: 100%; min-width: 820px; }
-    th, td { padding: 17px 20px; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; }
-    th { color: var(--muted); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
-    td strong { display: block; font-weight: 570; }
-    td small { display: block; margin-top: 4px; font-size: 10px; text-transform: uppercase; }
-    td code { display: block; max-width: 420px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .number { font: 600 16px ui-monospace, monospace; }
-    .cold-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-    .cold-grid h3 { padding: 22px 24px; margin: 0; border-bottom: 1px solid var(--line); font-size: 15px; font-weight: 540; }
-    .skill-list { list-style: none; margin: 0; padding: 0; max-height: 390px; overflow: auto; }
-    .skill-list li { display: flex; justify-content: space-between; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); font-size: 13px; }
-    .skill-list small { text-transform: uppercase; }
-    .quality { display: grid; grid-template-columns: repeat(3, 1fr); }
-    .quality article { padding: 25px; border-right: 1px solid var(--line); }
-    .quality article:last-child { border: 0; }
-    .quality strong { display: block; font-size: 30px; font-weight: 520; }
-    .quality span { color: var(--muted); font-size: 12px; }
-    .empty { color: var(--muted); padding: 30px !important; text-align: center; }
-    footer { margin-top: 70px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font: 11px ui-monospace, monospace; }
-
-    @media (max-width: 920px) {
-      main { width: min(100% - 24px, 720px); padding-top: 32px; }
-      header { grid-template-columns: 1fr; }
-      .timestamp { text-align: left; }
-      .metrics { grid-template-columns: 1fr 1fr; }
-      .metric:nth-child(2) { border-right: 0; }
-      .metric:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
-      .chart-grid, .split { grid-template-columns: 1fr; }
-    }
-    @media (max-width: 560px) {
-      h1 { font-size: 48px; }
-      .metrics, .cold-grid, .quality { grid-template-columns: 1fr; }
-      .metric { min-height: 120px; border-right: 0; border-bottom: 1px solid var(--line); }
-      .quality article { border-right: 0; border-bottom: 1px solid var(--line); }
-      .section-head { align-items: start; flex-direction: column; }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      * { scroll-behavior: auto !important; transition-duration: .01ms !important; }
-    }
+    .metric span, .copy, .muted, small { color: var(--muted); }
+    .metric strong { font-size: clamp(40px, 5vw, 70px); font-weight: 480; line-height: 1; letter-spacing: -.06em; }
+    section { margin-top: 76px; }
+    .section-head { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 20px; }
+    h2 { margin: 7px 0 0; font-size: clamp(28px, 4vw, 50px); font-weight: 520; letter-spacing: -.055em; }
+    .copy { margin: 0; max-width: 48ch; font-size: 12px; }
+    .filter-row { display: flex; gap: 9px; flex-wrap: wrap; }
+    .filter-row select { min-width: 150px; }
+    .panel { border: 1px solid var(--line); border-radius: 22px; background: rgba(14,18,25,.86); overflow: hidden; }
+    .platform-strip { display: grid; grid-template-columns: repeat(4, 1fr); }
+    .platform-card { padding: 24px; border-right: 1px solid var(--line); }
+    .platform-card:last-child { border: 0; }
+    .platform-card b { display: block; margin: 13px 0 4px; font-size: 28px; font-weight: 520; }
+    .badge, .platform-pills i { display: inline-flex; padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font: 700 9px/1 ui-monospace, monospace; text-transform: uppercase; font-style: normal; }
+    .heatmap-wrap, .chart { padding: 26px; overflow-x: auto; }
+    .heatmap { display: grid; grid-template-rows: repeat(7, 11px); grid-auto-flow: column; grid-auto-columns: 11px; gap: 5px; min-width: max-content; }
+    .day { width: 11px; height: 11px; border-radius: 2px; background: rgba(255,255,255,.055); }
+    .day[data-level="1"] { background: rgba(199,255,82,.3); } .day[data-level="2"] { background: rgba(199,255,82,.5); }
+    .day[data-level="3"] { background: rgba(199,255,82,.72); } .day[data-level="4"] { background: var(--acid); box-shadow: 0 0 12px rgba(199,255,82,.28); }
+    .chart-grid, .cold-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .matrix-grid { display: grid; grid-template-columns: 1.2fr .8fr .8fr; gap: 18px; }
+    .bars { height: 260px; display: flex; align-items: end; gap: 7px; min-width: 520px; }
+    .bar-slot { flex: 1; height: 220px; display: flex; flex-direction: column; justify-content: end; gap: 6px; color: var(--muted); font: 9px ui-monospace, monospace; text-align: center; }
+    .bar { position: relative; min-height: 2px; border-radius: 5px 5px 2px 2px; background: linear-gradient(var(--acid), #47756f); }
+    .bar em { position: absolute; top: -17px; left: 50%; transform: translateX(-50%); color: var(--ink); font-style: normal; }
+    .rows { display: grid; padding: 22px; gap: 15px; }
+    .meter-row { display: grid; grid-template-columns: minmax(92px, auto) 1fr auto; gap: 13px; align-items: center; font-size: 12px; }
+    .track { height: 6px; overflow: hidden; border-radius: 9px; background: rgba(255,255,255,.07); }
+    .track i { display: block; height: 100%; border-radius: inherit; background: var(--acid); }
+    .matrix { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 740px; }
+    th, td { padding: 16px 20px; border-bottom: 1px solid var(--line); text-align: left; font-size: 12px; }
+    td strong { display: block; font-size: 14px; font-weight: 560; }
+    .number { font: 650 15px ui-monospace, monospace; }
+    .platform-pills { display: flex; gap: 5px; flex-wrap: wrap; }
+    .list { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow: auto; }
+    .list li { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--line); font-size: 12px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+    .status-ready .dot { background: var(--acid); box-shadow: 0 0 9px rgba(199,255,82,.55); }
+    .status-table code { color: var(--muted); font-size: 10px; }
+    .empty { display: block !important; padding: 30px !important; color: var(--muted); text-align: center; }
+    footer { margin-top: 76px; border-top: 1px solid var(--line); padding-top: 18px; color: var(--muted); font: 10px ui-monospace, monospace; }
+    @media (max-width: 900px) { header { grid-template-columns: 1fr; } .controls { justify-items: start; } .timestamp { text-align: left; } .metrics, .platform-strip { grid-template-columns: 1fr 1fr; } .metric:nth-child(2), .platform-card:nth-child(2) { border-right: 0; } .chart-grid, .matrix-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 560px) { main { width: min(100% - 22px, 520px); } h1 { font-size: 56px; } .metrics, .platform-strip, .cold-grid { grid-template-columns: 1fr; } .metric, .platform-card { border-right: 0; border-bottom: 1px solid var(--line); } .section-head { align-items: start; flex-direction: column; } }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
   </style>
 </head>
 <body>
   <main>
     <header>
-      <div>
-        <div class="eyebrow">Local intelligence / Observable reads</div>
-        <h1>Skill<br><i>Pulse.</i></h1>
+      <div><div class="eyebrow">Local / Multi-agent intelligence</div><h1>Skill<br><span>Signal.</span></h1></div>
+      <div class="controls">
+        <label class="eyebrow" for="platform-filter">Platform scope</label>
+        <select id="platform-filter" aria-label="按平台筛选">
+          <option value="all">全部平台</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">OpenCode</option><option value="pi">Pi</option>
+        </select>
+        <div class="timestamp">生成时间<br>{{GENERATED_AT}}</div>
       </div>
-      <div class="timestamp">生成时间<br>{{GENERATED_AT}}</div>
     </header>
 
-    <div class="metrics">{{OVERVIEW_CARDS}}</div>
+    <div class="metrics" id="metrics"></div>
 
-    <section>
-      <div class="section-head">
-        <h2><span>01 / Daily</span>日视图</h2>
-        <p class="section-copy">过去 365 天的本地日期调用密度。色彩越亮，调用越集中。</p>
-      </div>
-      <div class="panel heatmap-wrap"><div class="heatmap" id="heatmap"></div></div>
-    </section>
+    <section><div class="section-head"><div><div class="index">01 / Fleet</div><h2>平台状态</h2></div><p class="copy">各平台调用规模、Skill 覆盖率与扫描状态。</p></div><div class="panel platform-strip" id="platform-summary"></div></section>
 
-    <section>
-      <div class="section-head">
-        <h2><span>02 / Momentum</span>周视图 · 月视图</h2>
-        <div class="filters">
-          <select id="skill-filter" aria-label="按 Skill 筛选周视图"><option value="all">全部 Skill</option></select>
-          <select id="agent-filter" aria-label="按代理类型筛选周视图"><option value="all">全部代理</option><option value="main">main</option><option value="subagent">subagent</option><option value="unknown">unknown</option></select>
-        </div>
-      </div>
-      <div class="chart-grid">
-        <div class="panel chart"><div class="chart-bars" id="weekly-chart"></div></div>
-        <div class="panel chart month">
-          <div class="chart-legend"><span>柱值 · 调用量</span><span>Skill · 活跃 Skill</span><span>% · 环比</span></div>
-          <div class="chart-bars" id="monthly-chart"></div>
-        </div>
-      </div>
-    </section>
+    <section><div class="section-head"><div><div class="index">02 / Rhythm</div><h2>平台趋势</h2></div><div class="filter-row"><select id="skill-filter" aria-label="按 Skill 筛选周趋势"><option value="all">全部 Skill</option></select><select id="agent-filter" aria-label="按代理筛选周趋势"><option value="all">全部代理</option><option value="main">Main</option><option value="subagent">Subagent</option><option value="unknown">Unknown</option></select></div></div><div class="panel heatmap-wrap"><div class="heatmap" id="heatmap"></div></div><div class="chart-grid" style="margin-top:18px"><div class="panel chart"><div class="index">Weekly / 12 weeks</div><div class="bars" id="weekly"></div></div><div class="panel chart"><div class="index">Monthly / 12 months</div><div class="bars" id="monthly"></div></div></div></section>
 
-    <section>
-      <div class="section-head">
-        <h2><span>03 / Origin</span>代理与项目</h2>
-        <p class="section-copy">区分主代理、子代理与无法可靠判断的调用，并按工作目录观察使用来源。</p>
-      </div>
-      <div class="split">
-        <div class="panel agent-list" id="agent-list"></div>
-        <div class="panel cwd-list" id="cwd-list"></div>
-      </div>
-    </section>
+    <section><div class="section-head"><div><div class="index">03 / Attribution</div><h2>平台 × 代理</h2></div><p class="copy">拆分主代理、子代理和未知来源，并对照结构化、slash 与文件读取证据。</p></div><div class="matrix-grid"><div class="panel matrix"><table><thead><tr><th>平台</th><th>Main</th><th>Subagent</th><th>Unknown</th></tr></thead><tbody id="agent-body"></tbody></table></div><div class="panel rows" id="evidence"><div class="index">证据分布</div></div><div class="panel rows" id="cwd"><div class="index">项目目录</div></div></div></section>
 
-    <section>
-      <div class="section-head"><h2><span>04 / Ranking</span>Skill 排行</h2></div>
-      <div class="panel table-wrap">
-        <table>
-          <thead><tr><th>Skill / 来源</th><th>总调用</th><th>活跃天数</th><th>最后调用</th><th>来源目录</th></tr></thead>
-          <tbody>{{RANKING_ROWS}}</tbody>
-        </table>
-      </div>
-    </section>
+    <section><div class="section-head"><div><div class="index">04 / Ranking</div><h2>Skill 排行与平台分布</h2></div></div><div class="panel matrix"><table><thead><tr><th>Skill</th><th>调用</th><th>活跃天数</th><th>平台分布</th><th>最后调用</th></tr></thead><tbody id="ranking-body"></tbody></table></div></section>
 
-    <section>
-      <div class="section-head">
-        <h2><span>05 / Dormancy</span>冷门清单</h2>
-        <p class="section-copy">当前已安装但无调用记录，以及超过 30 天未调用的 Skill。</p>
-      </div>
-      <div class="cold-grid">
-        <div class="panel"><h3>从未使用</h3><ul class="skill-list">{{NEVER_ROWS}}</ul></div>
-        <div class="panel"><h3>30 天未用</h3><ul class="skill-list">{{STALE_ROWS}}</ul></div>
-      </div>
-    </section>
+    <section><div class="section-head"><div><div class="index">05 / Dormancy</div><h2>按平台冷门清单</h2></div></div><div class="cold-grid"><div class="panel"><div class="rows"><strong>从未使用</strong></div><ul class="list" id="never-list"></ul></div><div class="panel"><div class="rows"><strong>30 天未用</strong></div><ul class="list" id="stale-list"></ul></div></div></section>
 
-    <section>
-      <div class="section-head"><h2><span>06 / Integrity</span>数据质量</h2></div>
-      <div class="panel quality">{{QUALITY_CARDS}}</div>
-    </section>
+    <section><div class="section-head"><div><div class="index">06 / Health</div><h2>平台状态与数据质量</h2></div><p class="copy" id="quality"></p></div><div class="panel matrix"><table class="status-table"><thead><tr><th>平台</th><th>状态</th><th>最后历史扫描</th><th>最后实时更新</th><th>解析版本</th></tr></thead><tbody id="status-body"></tbody></table></div></section>
 
-    <footer>只统计转录中真实读取 SKILL.md 的工具调用 · 数据保留在本机</footer>
+    <footer>全部统计与报告仅保存在本机 · 页面不加载任何外部资源</footer>
   </main>
 
   <script id="dashboard-data" type="application/json">{{DATA_JSON}}</script>
   <script>
-    const data = JSON.parse(document.getElementById('dashboard-data').textContent);
-    const escapeText = value => String(value);
+    const DATA = JSON.parse(document.getElementById('dashboard-data').textContent);
+    const NAMES = {codex:'Codex', claude:'Claude Code', opencode:'OpenCode', pi:'Pi'};
+    const COLORS = {codex:'var(--codex)', claude:'var(--claude)', opencode:'var(--opencode)', pi:'var(--pi)'};
+    const create = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
+    const empty = text => create('li', 'empty', text);
 
-    function renderHeatmap() {
-      const root = document.getElementById('heatmap');
-      const maximum = Math.max(...data.daily.map(item => item.count), 1);
-      root.replaceChildren(...data.daily.map(item => {
-        const cell = document.createElement('span');
-        cell.className = 'day';
-        cell.dataset.level = item.count ? Math.max(1, Math.ceil(item.count / maximum * 4)) : 0;
-        cell.title = `${item.date}: ${item.count} 次`;
-        return cell;
-      }));
+    function renderMetrics(view) {
+      const cards = [['总调用', view.overview.total_calls], ['已安装 Skill', view.overview.installed_skills], ['已使用 Skill', view.overview.used_skills], ['从未使用', view.overview.never_used_skills], ['活跃天数', view.overview.active_days]];
+      document.getElementById('metrics').replaceChildren(...cards.map(([label, value]) => { const card=create('article','metric'); card.append(create('span','',label),create('strong','',value)); return card; }));
     }
-
-    function bars(root, rows, key, label) {
-      const maximum = Math.max(...rows.map(item => item[key]), 1);
-      root.replaceChildren(...rows.map(item => {
-        const slot = document.createElement('div');
-        slot.className = 'bar-slot';
-        const bar = document.createElement('div');
-        bar.className = 'bar';
-        bar.style.height = `${Math.max(item[key] ? 3 : 1, item[key] / maximum * 100)}%`;
-        bar.title = `${item[label]}: ${item[key]} 次`;
-        const value = document.createElement('em');
-        value.textContent = item[key];
-        bar.append(value);
-        const caption = document.createElement('span');
-        caption.textContent = item[label].slice(5);
-        slot.append(bar, caption);
-        return slot;
-      }));
+    function renderFleet() {
+      const root=document.getElementById('platform-summary');
+      root.replaceChildren(...DATA.platform_summaries.map(item => { const card=create('article','platform-card'); card.append(create('span','badge',NAMES[item.platform]),create('b','',item.calls),create('small','',`${item.used_skills} 已使用 / ${item.installed_skills} 已安装 · ${item.status}`)); return card; }));
     }
-
-    function renderWeekly() {
-      const skill = document.getElementById('skill-filter').value;
-      const agent = document.getElementById('agent-filter').value;
-      const counts = new Map(data.weekly.map(item => [item.week, 0]));
-      data.weekly_detail.forEach(item => {
-        if ((skill === 'all' || item.skill_path === skill) && (agent === 'all' || item.agent === agent)) {
-          counts.set(item.week, (counts.get(item.week) || 0) + item.count);
-        }
-      });
-      const rows = data.weekly.map(item => ({week: item.week, count: counts.get(item.week) || 0}));
-      bars(document.getElementById('weekly-chart'), rows, 'count', 'week');
+    function renderHeatmap(view) {
+      const maximum=Math.max(...view.daily.map(row=>row.count),1);
+      document.getElementById('heatmap').replaceChildren(...view.daily.map(row => { const cell=create('span','day'); cell.dataset.level=row.count ? Math.max(1,Math.ceil(row.count/maximum*4)) : 0; cell.title=`${row.date}: ${row.count} 次`; cell.tabIndex=row.count ? 0 : -1; cell.setAttribute('aria-label',cell.title); return cell; }));
     }
-
-    function renderMonthly() {
-      const root = document.getElementById('monthly-chart');
-      const maximum = Math.max(...data.monthly.map(item => item.count), 1);
-      root.replaceChildren(...data.monthly.map(item => {
-        const change = item.change_percent === null
-          ? '—'
-          : `${item.change_percent > 0 ? '+' : ''}${item.change_percent}%`;
-        const slot = document.createElement('div');
-        slot.className = 'bar-slot';
-        const bar = document.createElement('div');
-        bar.className = 'bar';
-        bar.style.height = `${Math.max(item.count ? 3 : 1, item.count / maximum * 100)}%`;
-        bar.title = `${item.month}: ${item.count} 次 · ${item.active_skills} 个活跃 Skill · 环比 ${change}`;
-        const value = document.createElement('em');
-        value.textContent = item.count;
-        bar.append(value);
-        const caption = document.createElement('span');
-        caption.textContent = item.month.slice(5);
-        const meta = document.createElement('span');
-        meta.className = 'month-meta';
-        meta.textContent = `${item.active_skills} Skill\n${change}`;
-        slot.append(bar, caption, meta);
-        return slot;
-      }));
+    function renderBars(id, rows, label) {
+      const maximum=Math.max(...rows.map(row=>row.count),1);
+      document.getElementById(id).replaceChildren(...rows.map(item => { const slot=create('div','bar-slot'); const bar=create('div','bar'); bar.style.height=`${Math.max(item.count ? 3 : 1,item.count/maximum*100)}%`; let edge=0; const stops=[]; Object.entries(item.platforms).forEach(([p,n]) => { const start=edge; edge+=n/Math.max(item.count,1)*100; stops.push(`${COLORS[p]} ${start}% ${edge}%`); }); if (stops.length) bar.style.background=`linear-gradient(to top, ${stops.join(',')})`; const distribution=Object.entries(item.platforms).map(([p,n])=>`${NAMES[p]} ${n}`).join(' · ') || '无调用'; const monthly=id==='monthly' ? ` · ${item.active_skills} 个活跃 Skill · 环比 ${item.change_percent===null?'—':item.change_percent+'%'}` : ''; bar.title=`${item[label]}: ${item.count} 次 · ${distribution}${monthly}`; bar.tabIndex=item.count ? 0 : -1; bar.setAttribute('aria-label',bar.title); bar.append(create('em','',item.count)); slot.append(bar,create('span','',item[label].slice(5))); if (id==='monthly') slot.append(create('small','',`${item.active_skills} Skill · ${item.change_percent===null?'—':item.change_percent+'%'}`)); return slot; }));
     }
-
-    function renderBreakdowns() {
-      const total = Math.max(Object.values(data.agent_counts).reduce((sum, value) => sum + value, 0), 1);
-      const agentRoot = document.getElementById('agent-list');
-      Object.entries(data.agent_counts).forEach(([kind, count]) => {
-        const row = document.createElement('div'); row.className = 'agent-row';
-        const label = document.createElement('span'); label.textContent = kind;
-        const track = document.createElement('div'); track.className = 'track';
-        const fill = document.createElement('i'); fill.style.width = `${count / total * 100}%`; track.append(fill);
-        const value = document.createElement('strong'); value.textContent = count;
-        row.append(label, track, value); agentRoot.append(row);
-      });
-      const cwdRoot = document.getElementById('cwd-list');
-      data.cwd_counts.slice(0, 8).forEach(item => {
-        const row = document.createElement('div'); row.className = 'cwd-row';
-        const label = document.createElement('code'); label.textContent = escapeText(item.cwd); label.title = item.cwd;
-        const track = document.createElement('div'); track.className = 'track';
-        const fill = document.createElement('i'); fill.style.width = `${item.count / Math.max(data.cwd_counts[0].count, 1) * 100}%`; track.append(fill);
-        const value = document.createElement('strong'); value.textContent = item.count;
-        row.append(label, track, value); cwdRoot.append(row);
-      });
-      if (!data.cwd_counts.length) cwdRoot.textContent = '暂无项目目录数据';
+    function filteredWeekly(view) {
+      const skill=document.getElementById('skill-filter').value; const agent=document.getElementById('agent-filter').value;
+      const rows=new Map(view.weekly.map(row=>[row.week,{week:row.week,count:0,platforms:{}}]));
+      view.weekly_detail.forEach(item => { if ((skill==='all'||item.skill_name===skill)&&(agent==='all'||item.agent===agent)) { const row=rows.get(item.week); if (row) { row.count+=item.count; row.platforms[item.platform]=(row.platforms[item.platform]||0)+item.count; } } });
+      return [...rows.values()];
     }
-
-    data.ranking.forEach(item => {
-      const option = document.createElement('option');
-      option.value = item.path; option.textContent = item.name;
-      document.getElementById('skill-filter').append(option);
-    });
-    document.getElementById('skill-filter').addEventListener('change', renderWeekly);
-    document.getElementById('agent-filter').addEventListener('change', renderWeekly);
-    renderHeatmap();
-    renderWeekly();
-    renderMonthly();
-    renderBreakdowns();
+    function populateSkills(view) {
+      const root=document.getElementById('skill-filter'); const first=root.options[0]; root.replaceChildren(first,...view.ranking.map(item=>{ const option=create('option','',item.name); option.value=item.identity; return option; })); root.value='all';
+    }
+    function renderAgents(view) {
+      document.getElementById('agent-body').replaceChildren(...view.agent_by_platform.map(row => { const tr=create('tr'); tr.append(create('td','',NAMES[row.platform]),create('td','number',row.main),create('td','number',row.subagent),create('td','number',row.unknown)); return tr; }));
+      const root=document.getElementById('evidence'); const total=Math.max(Object.values(view.evidence_counts).reduce((a,b)=>a+b,0),1); const labels={structured_skill:'结构化 Skill',slash_skill:'Slash Skill',skill_file_read:'文件读取'};
+      root.replaceChildren(create('div','index','证据分布'),...Object.entries(view.evidence_counts).map(([key,count]) => { const row=create('div','meter-row'); const track=create('div','track'); const fill=create('i'); fill.style.width=`${count/total*100}%`; track.append(fill); row.append(create('span','',labels[key]),track,create('strong','',count)); return row; }));
+      const cwd=document.getElementById('cwd'); const maximum=Math.max(...view.cwd_counts.map(item=>item.count),1); cwd.replaceChildren(create('div','index','项目目录'),...(view.cwd_counts.length ? view.cwd_counts.slice(0,8).map(item => { const row=create('div','meter-row'); const label=create('span','',item.cwd); label.title=item.cwd; const track=create('div','track'); const fill=create('i'); fill.style.width=`${item.count/maximum*100}%`; track.append(fill); row.append(label,track,create('strong','',item.count)); return row; }) : [create('div','muted','暂无项目目录数据')]));
+    }
+    function renderRanking(view) {
+      const root=document.getElementById('ranking-body');
+      if (!view.ranking.length) { const tr=create('tr'); const td=create('td','empty','还没有可观测的 Skill 调用'); td.colSpan=5; tr.append(td); root.replaceChildren(tr); return; }
+      root.replaceChildren(...view.ranking.map(item => { const tr=create('tr'); const skill=create('td'); skill.append(create('strong','',item.name),create('small','',item.installed?'已安装':'仅历史记录')); const pills=create('td','platform-pills'); Object.entries(item.platforms).forEach(([p,n])=>{ const pill=create('i','',`${NAMES[p]} ${n}`); pill.title=item.installations.filter(row=>row.platform===p).map(row=>row.path||row.key).join('\n')||'仅历史记录'; pills.append(pill); }); tr.append(skill,create('td','number',item.calls),create('td','number',item.active_days),pills,create('td','muted',item.last_invoked_at)); return tr; }));
+    }
+    function renderList(id, rows, message) { const root=document.getElementById(id); root.replaceChildren(...(rows.length ? rows.map(item => { const li=create('li'); li.append(create('span','badge',NAMES[item.platform]),create('strong','',item.name),create('small','',item.source)); return li; }) : [empty(message)])); }
+    function renderStatus(selected, view) {
+      const rows=DATA.platform_status.filter(row=>selected==='all'||row.platform===selected);
+      document.getElementById('status-body').replaceChildren(...rows.map(item => { const tr=create('tr',`status-${item.status}`); const platform=create('td'); platform.append(create('span','dot'),document.createTextNode(` ${NAMES[item.platform]}`),create('code','',item.resolved_root||'')); tr.append(platform,create('td','',item.status),create('td','',item.last_history_scan_at||'—'),create('td','',item.last_realtime_at||'—'),create('td','',item.format_version||'—')); return tr; }));
+      document.getElementById('quality').textContent=`诊断 ${view.quality.diagnostics} · 无法解析 ${view.quality.unparsed_events} · 未知代理 ${view.quality.unknown_agents} · 扫描失败 ${view.quality.scan_failures}`;
+    }
+    function render() { const selected=document.getElementById('platform-filter').value; const view=DATA.views[selected]; populateSkills(view); renderMetrics(view); renderHeatmap(view); renderBars('weekly',filteredWeekly(view),'week'); renderBars('monthly',view.monthly,'month'); renderAgents(view); renderRanking(view); renderList('never-list',view.never_used,'所有已安装 Skill 都有调用记录'); renderList('stale-list',view.stale_30_days,'没有 30 天以上未调用的 Skill'); renderStatus(selected,view); }
+    function renderWeekly() { const view=DATA.views[document.getElementById('platform-filter').value]; renderBars('weekly',filteredWeekly(view),'week'); }
+    renderFleet(); document.getElementById('platform-filter').addEventListener('change',render); document.getElementById('skill-filter').addEventListener('change',renderWeekly); document.getElementById('agent-filter').addEventListener('change',renderWeekly); render();
   </script>
 </body>
 </html>

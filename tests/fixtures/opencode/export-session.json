@@ -1,0 +1,129 @@
+{
+  "info": {
+    "id": "ses_fixture",
+    "parentID": "ses_parent",
+    "directory": "/workspace/project",
+    "time": {
+      "created": 1788825600000,
+      "updated": 1788825660000
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_assistant",
+        "sessionID": "ses_fixture",
+        "role": "assistant",
+        "time": {
+          "created": 1788825601000,
+          "completed": 1788825605000
+        },
+        "modelID": "model-test",
+        "providerID": "provider-test",
+        "path": {
+          "cwd": "/workspace/project/subdir",
+          "root": "/workspace/project"
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_skill_alpha",
+          "sessionID": "ses_fixture",
+          "messageID": "msg_assistant",
+          "type": "tool",
+          "callID": "call_alpha",
+          "tool": "skill",
+          "state": {
+            "status": "completed",
+            "input": {
+              "name": "alpha"
+            },
+            "output": "loaded",
+            "title": "Loaded skill: alpha",
+            "metadata": {},
+            "time": {
+              "start": 1788825602000,
+              "end": 1788825603000
+            }
+          }
+        },
+        {
+          "id": "prt_future",
+          "sessionID": "ses_fixture",
+          "messageID": "msg_assistant",
+          "type": "future-part",
+          "payload": {
+            "tool": "skill",
+            "name": "must-not-count"
+          }
+        },
+        {
+          "id": "prt_bash",
+          "sessionID": "ses_fixture",
+          "messageID": "msg_assistant",
+          "type": "tool",
+          "callID": "call_bash",
+          "tool": "bash",
+          "state": {
+            "status": "completed",
+            "input": {
+              "name": "must-not-count"
+            },
+            "output": "",
+            "title": "shell",
+            "metadata": {},
+            "time": {
+              "start": 1788825603000,
+              "end": 1788825604000
+            }
+          }
+        },
+        {
+          "id": "prt_error",
+          "sessionID": "ses_fixture",
+          "messageID": "msg_assistant",
+          "type": "tool",
+          "callID": "call_error",
+          "tool": "skill",
+          "state": {
+            "status": "error",
+            "input": {
+              "name": "failed-skill"
+            },
+            "error": "not found",
+            "time": {
+              "start": 1788825604000,
+              "end": 1788825605000
+            }
+          }
+        },
+        {
+          "id": "prt_skill_beta",
+          "sessionID": "ses_fixture",
+          "messageID": "msg_assistant",
+          "type": "tool",
+          "callID": "call_beta",
+          "tool": "skill",
+          "state": {
+            "status": "completed",
+            "input": {
+              "name": "beta",
+              "futureArgument": true
+            },
+            "output": "loaded",
+            "title": "Loaded skill: beta",
+            "metadata": {
+              "futureMetadata": true
+            },
+            "time": {
+              "start": 1788825606000,
+              "end": 1788825607000
+            }
+          },
+          "futureField": true
+        }
+      ]
+    }
+  ],
+  "futureTopLevelField": true
+}

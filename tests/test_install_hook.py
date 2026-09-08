@@ -154,6 +154,30 @@ class InstallHookTests(unittest.TestCase):
             {"hooks": {"Stop": []}},
         )
 
+    def test_unified_codex_api_reports_status_and_backs_up_uninstall(self):
+        self.config_path.write_text(
+            json.dumps({"custom": True, "hooks": {"Stop": []}}), encoding="utf-8"
+        )
+
+        installed = install_hook.install_platform("codex", codex_home=self.codex_home)
+        installed_bytes = self.config_path.read_bytes()
+        self.assertEqual("installed", installed["status"])
+        self.assertEqual("installed", install_hook.integration_status(
+            "codex", codex_home=self.codex_home
+        ))
+
+        unchanged = install_hook.install_platform("codex", codex_home=self.codex_home)
+        self.assertEqual("already_installed", unchanged["status"])
+        self.assertEqual(installed_bytes, self.config_path.read_bytes())
+
+        removed = install_hook.uninstall_platform("codex", codex_home=self.codex_home)
+        self.assertEqual("removed", removed["status"])
+        self.assertTrue(Path(removed["backup"]).is_file())
+        self.assertEqual(installed_bytes, Path(removed["backup"]).read_bytes())
+        self.assertEqual("not_installed", install_hook.integration_status(
+            "codex", codex_home=self.codex_home
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,1 @@
+{"type":"assistant","sessionId":"session-main","uuid":"sub-turn-1","cwd":"__PROJECT_ROOT__","timestamp":"2026-09-08T01:05:00Z","agentId":"agent-redacted","message":{"role":"assistant","model":"claude-haiku-test","content":[{"type":"tool_use","id":"toolu-sub-skill","name":"Skill","input":{"name":"beta"}}]}}

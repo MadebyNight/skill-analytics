@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
@@ -15,10 +16,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ERROR_LOG = PROJECT_ROOT / "data" / "errors.log"
 
 
-def _generate_report() -> None:
+def _generate_report(
+    db_path: str | Path = scanner.DEFAULT_DB_PATH,
+    output_path: str | Path | None = None,
+) -> None:
     from report import generate_report
 
-    generate_report()
+    if output_path is None:
+        generate_report(db_path)
+    else:
+        generate_report(db_path, output_path)
 
 
 def _value(payload: dict[str, object], snake_case: str, camel_case: str) -> object | None:
@@ -37,7 +44,13 @@ def _log_error(error: BaseException, error_log: Path, transcript_path: object = 
         pass
 
 
-def main(stdin: TextIO | None = None, *, error_log: Path = DEFAULT_ERROR_LOG) -> int:
+def main(
+    stdin: TextIO | None = None,
+    *,
+    error_log: Path = DEFAULT_ERROR_LOG,
+    db_path: str | Path = scanner.DEFAULT_DB_PATH,
+    output_path: str | Path | None = None,
+) -> int:
     transcript_path: object = None
     try:
         payload = json.load(stdin or sys.stdin)
@@ -51,18 +64,37 @@ def main(stdin: TextIO | None = None, *, error_log: Path = DEFAULT_ERROR_LOG) ->
         session_id = _value(payload, "session_id", "sessionId")
         cwd = payload.get("cwd")
         model = payload.get("model")
+        scan_options = {
+            "session_id": str(session_id) if session_id is not None else None,
+            "cwd": str(cwd) if cwd is not None else None,
+            "model": str(model) if model is not None else None,
+            "ingest_source": "hook",
+        }
+        if Path(db_path).resolve() != Path(scanner.DEFAULT_DB_PATH).resolve():
+            scan_options["db_path"] = db_path
         scanner.scan_transcript(
             transcript_path,
-            session_id=str(session_id) if session_id is not None else None,
-            cwd=str(cwd) if cwd is not None else None,
-            model=str(model) if model is not None else None,
-            ingest_source="hook",
+            **scan_options,
         )
-        _generate_report()
+        if (
+            Path(db_path).resolve() == Path(scanner.DEFAULT_DB_PATH).resolve()
+            and output_path is None
+        ):
+            _generate_report()
+        else:
+            _generate_report(db_path, output_path)
     except BaseException as error:
         _log_error(error, Path(error_log), transcript_path)
     return 0
 
 
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--db", type=Path, default=scanner.DEFAULT_DB_PATH)
+    parser.add_argument("--output", type=Path)
+    return parser
+
+
 if __name__ == "__main__":
-    main()
+    arguments = _parser().parse_args()
+    main(db_path=arguments.db, output_path=arguments.output)

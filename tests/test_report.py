@@ -1,13 +1,17 @@
 import json
-import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 import report
 import scanner
+
+
+PLATFORMS = ("codex", "claude", "opencode", "pi")
 
 
 class ReportTestCase(unittest.TestCase):
@@ -16,213 +20,298 @@ class ReportTestCase(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
         self.db_path = self.root / "analytics.db"
-        self.codex_home = self.root / ".codex"
-        self.agents_home = self.root / ".agents"
-        self.plugin_root = self.codex_home / "plugins" / "cache"
-        self.alpha = self._skill(self.codex_home / "skills" / "alpha", "Alpha")
-        self.system = self._skill(
-            self.codex_home / "skills" / ".system" / "system-skill", "System Skill"
+        connection = sqlite3.connect(self.db_path)
+        connection.executescript(
+            """
+            CREATE TABLE installed_skills (
+                platform TEXT NOT NULL, skill_key TEXT NOT NULL, skill_name TEXT NOT NULL,
+                skill_path TEXT, skill_source TEXT NOT NULL, first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL, PRIMARY KEY (platform, skill_key)
+            );
+            CREATE TABLE invocations (
+                platform TEXT NOT NULL, session_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+                skill_name TEXT NOT NULL, skill_path TEXT, skill_key TEXT NOT NULL,
+                evidence_type TEXT NOT NULL, invoked_at TEXT NOT NULL, cwd TEXT,
+                agent_kind TEXT NOT NULL, model TEXT, ingest_source TEXT NOT NULL,
+                PRIMARY KEY (platform, session_id, turn_id, skill_key)
+            );
+            CREATE TABLE diagnostics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL,
+                source_path TEXT NOT NULL, byte_offset INTEGER NOT NULL, line_number INTEGER,
+                event_type TEXT, category TEXT NOT NULL, detail TEXT NOT NULL,
+                adapter_version TEXT, format_version TEXT, created_at TEXT NOT NULL,
+                UNIQUE (platform, source_path, byte_offset, category)
+            );
+            CREATE TABLE platform_status (
+                platform TEXT PRIMARY KEY, status TEXT NOT NULL, resolved_root TEXT,
+                last_history_scan_at TEXT, last_realtime_at TEXT, adapter_version TEXT,
+                format_version TEXT, updated_at TEXT NOT NULL
+            );
+            """
         )
-        self.beta = self._skill(self.agents_home / "skills" / "beta", None)
-        self.gamma = self._skill(
-            self.plugin_root
-            / "openai-primary-runtime"
-            / "gamma-plugin"
-            / "2.0.0"
-            / "skills"
-            / "gamma",
-            "Gamma",
-        )
-
-        connection = scanner.init_db(self.db_path)
+        for platform in PLATFORMS:
+            status = "ready" if platform != "pi" else "not_installed"
+            connection.execute(
+                "INSERT INTO platform_status VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (platform, status, f"/{platform}",
+                 "2026-09-07T06:00:00Z" if status == "ready" else None,
+                 "2026-09-07T07:00:00Z" if platform == "claude" else None,
+                 "1.0", "v1", "2026-09-07T07:00:00Z"),
+            )
+        connection.commit()
         connection.close()
 
-    @staticmethod
-    def _skill(directory, name):
-        directory.mkdir(parents=True)
-        path = directory / "SKILL.md"
-        frontmatter = f"---\nname: {name}\n---\n" if name else "No frontmatter\n"
-        path.write_text(frontmatter, encoding="utf-8")
-        return path.resolve()
+    def _install(self, platform, key, name, path=None, source="user"):
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.execute(
+                "INSERT INTO installed_skills VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (platform, key, name, path, source,
+                 "2026-01-01T00:00:00Z", "2026-09-07T00:00:00Z"),
+            )
 
-    def _insert_invocation(self, turn, skill, invoked_at, agent="main", cwd="/work/one"):
-        skill_path = os.path.normcase(str(skill))
-        connection = sqlite3.connect(self.db_path)
-        try:
-            name = report._skill_name(skill)
+    def _invoke(self, platform, turn, name, invoked_at, *, key=None,
+                evidence="structured_skill", agent="main", path=None):
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
-                "INSERT OR IGNORE INTO skills VALUES (?, ?, ?, ?, ?)",
-                (skill_path, name, "other", invoked_at, invoked_at),
+                "INSERT INTO invocations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (platform, f"{platform}-session", turn, name, path,
+                 key or f"name:{name.casefold()}", evidence, invoked_at, "/work",
+                 agent, "test-model", "history"),
             )
-            connection.execute(
-                "INSERT INTO invocations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("session", turn, skill_path, invoked_at, cwd, agent, "gpt-test", "history"),
-            )
-            connection.commit()
-        finally:
-            connection.close()
 
     def _collect(self):
-        return report.collect_report_data(
-            db_path=self.db_path,
-            codex_home=self.codex_home,
-            agents_home=self.agents_home,
-            plugin_root=self.plugin_root,
+        with mock.patch("report._refresh_codex_inventory"):
+            return report.collect_report_data(
+                self.db_path, now=datetime(2026, 9, 7, 12, tzinfo=timezone.utc),
+                local_timezone=timezone.utc,
+            )
+
+    def test_legacy_report_refreshes_codex_inventory_from_all_override_roots(self):
+        codex_home = self.root / "codex"
+        agents_home = self.root / "agents"
+        plugin_root = self.root / "custom-plugins"
+        skill_paths = (
+            codex_home / "skills" / "alpha" / "SKILL.md",
+            agents_home / "skills" / "beta" / "SKILL.md",
+            plugin_root / "market" / "plugin" / "1.0" / "skills" / "gamma" / "SKILL.md",
+        )
+        for path, name in zip(skill_paths, ("Alpha", "Beta", "Gamma")):
+            path.parent.mkdir(parents=True)
+            path.write_text(f"---\nname: {name}\n---\n", encoding="utf-8")
+
+        data = report.collect_report_data(
+            self.db_path,
+            codex_home=codex_home,
+            agents_home=agents_home,
+            plugin_root=plugin_root,
             now=datetime(2026, 9, 7, 12, tzinfo=timezone.utc),
             local_timezone=timezone.utc,
         )
 
-    def test_installed_skills_are_refreshed_and_never_used_is_visible(self):
-        self._insert_invocation("one", self.alpha, "2026-09-07T04:00:00Z")
+        self.assertEqual(3, data["views"]["codex"]["overview"]["installed_skills"])
+        self.assertEqual({"Alpha", "Beta", "Gamma"}, {row["name"] for row in data["views"]["codex"]["never_used"]})
+
+    def test_failed_codex_inventory_discovery_preserves_stored_inventory(self):
+        self._install("codex", "saved", "Saved", "/saved/SKILL.md")
+        with mock.patch("report.discover_skills", side_effect=OSError("unreadable")):
+            data = report.collect_report_data(
+                self.db_path,
+                codex_home=self.root / "codex",
+                agents_home=self.root / "agents",
+                plugin_root=self.root / "plugins",
+                now=datetime(2026, 9, 7, 12, tzinfo=timezone.utc),
+                local_timezone=timezone.utc,
+            )
+        self.assertEqual(["Saved"], [row["name"] for row in data["views"]["codex"]["never_used"]])
+
+    def test_single_platform_overview_counts_same_name_paths_by_skill_key(self):
+        self._install("codex", "alpha-one", "Alpha", "/one/SKILL.md")
+        self._install("codex", "alpha-two", "alpha", "/two/SKILL.md")
+        self._invoke("codex", "one", "Alpha", "2026-09-07T01:00:00Z", key="alpha-one")
 
         data = self._collect()
 
-        self.assertEqual(4, data["overview"]["installed_skills"])
-        self.assertEqual(1, data["overview"]["used_skills"])
-        self.assertEqual(3, data["overview"]["never_used_skills"])
+        codex = data["views"]["codex"]
         self.assertEqual(
-            {"System Skill", "beta", "Gamma"},
-            {skill["name"] for skill in data["never_used"]},
+            {"installed_skills": 2, "used_skills": 1, "never_used_skills": 1},
+            {key: codex["overview"][key] for key in ("installed_skills", "used_skills", "never_used_skills")},
         )
-        sources = {skill["name"]: skill["source"] for skill in data["never_used"]}
-        self.assertEqual("system", sources["System Skill"])
-        self.assertEqual("agents", sources["beta"])
-        self.assertEqual("plugin", sources["Gamma"])
+        self.assertEqual(1, data["views"]["all"]["overview"]["installed_skills"])
+        self.assertEqual(1, data["views"]["all"]["overview"]["used_skills"])
+        self.assertEqual(0, data["views"]["all"]["overview"]["never_used_skills"])
 
-    def test_discovery_uses_current_plugin_version_and_deduplicates_by_name_priority(self):
-        self._skill(
-            self.plugin_root
-            / "openai-primary-runtime"
-            / "gamma-plugin"
-            / "1.0.0"
-            / "skills"
-            / "old-gamma",
-            "Legacy Gamma",
-        )
-        self._skill(
-            self.plugin_root
-            / "openai-bundled"
-            / "plugin-backup-old"
-            / "gamma-plugin"
-            / "9.0.0"
-            / "skills"
-            / "backup-gamma",
-            "Backup Gamma",
-        )
-        agents_alpha = self._skill(self.agents_home / "skills" / "alpha-copy", "Alpha")
-        self._skill(
-            self.plugin_root
-            / "openai-primary-runtime"
-            / "alpha-plugin"
-            / "1.0.0"
-            / "skills"
-            / "alpha-copy",
-            "Alpha",
-        )
-
-        skills = report.discover_skills(
-            self.codex_home, self.agents_home, self.plugin_root
-        )
-
-        self.assertEqual(1, sum(skill["name"] == "Alpha" for skill in skills))
-        alpha = next(skill for skill in skills if skill["name"] == "Alpha")
-        self.assertEqual("other", alpha["source"])
-        self.assertEqual(str(self.alpha).casefold(), alpha["path"].casefold())
-        self.assertEqual(1, sum(skill["name"] == "Gamma" for skill in skills))
-        self.assertNotIn("Legacy Gamma", {skill["name"] for skill in skills})
-        self.assertNotIn("Backup Gamma", {skill["name"] for skill in skills})
-
-        self._insert_invocation("agents-alpha", agents_alpha, "2026-09-07T04:00:00Z")
-        data = self._collect()
-        self.assertNotIn("Alpha", {skill["name"] for skill in data["never_used"]})
-        alpha_usage = next(skill for skill in data["ranking"] if skill["name"] == "Alpha")
-        self.assertTrue(alpha_usage["installed"])
-        self.assertEqual(str(self.alpha).casefold(), alpha_usage["path"].casefold())
-
-    def test_daily_weekly_monthly_agent_cwd_and_ranking_aggregates(self):
-        self._insert_invocation("one", self.alpha, "2026-08-31T23:30:00Z", "main")
-        self._insert_invocation("two", self.alpha, "2026-09-01T00:30:00Z", "subagent")
-        self._insert_invocation("three", self.alpha, "2026-09-07T04:00:00Z", "unknown", "/work/two")
+    def test_all_and_each_platform_views_merge_skills_by_name(self):
+        self._install("codex", "/codex/alpha", "Alpha", "/codex/alpha/SKILL.md")
+        self._install("claude", "/claude/alpha", "alpha", "/claude/alpha/SKILL.md")
+        self._invoke("codex", "c1", "Alpha", "2026-09-01T01:00:00Z", key="/codex/alpha")
+        self._invoke("claude", "a1", "alpha", "2026-09-02T01:00:00Z", key="/claude/alpha")
+        self._invoke("opencode", "o1", "Beta", "2026-09-03T01:00:00Z")
 
         data = self._collect()
 
-        daily = {row["date"]: row["count"] for row in data["daily"]}
-        self.assertEqual(1, daily["2026-08-31"])
-        self.assertEqual(1, daily["2026-09-01"])
-        self.assertEqual(1, daily["2026-09-07"])
-        weekly = {row["week"]: row["count"] for row in data["weekly"]}
-        self.assertEqual(2, weekly["2026-08-31"])
-        self.assertEqual(1, weekly["2026-09-07"])
-        monthly = {row["month"]: row for row in data["monthly"]}
-        self.assertEqual(1, monthly["2026-08"]["count"])
-        self.assertEqual(2, monthly["2026-09"]["count"])
-        self.assertEqual(100.0, monthly["2026-09"]["change_percent"])
+        self.assertEqual(["all", *PLATFORMS], list(data["views"]))
+        self.assertEqual(3, data["views"]["all"]["overview"]["total_calls"])
+        self.assertEqual(2, data["views"]["all"]["overview"]["used_skills"])
+        alpha = next(row for row in data["views"]["all"]["ranking"] if row["name"].casefold() == "alpha")
+        self.assertEqual(2, alpha["calls"])
+        self.assertEqual({"codex": 1, "claude": 1}, alpha["platforms"])
+        self.assertEqual(1, data["views"]["codex"]["overview"]["total_calls"])
+        self.assertEqual(0, data["views"]["pi"]["overview"]["total_calls"])
+
+    def test_trends_platform_agent_and_evidence_distributions(self):
+        self._invoke("codex", "c1", "Alpha", "2026-08-31T23:00:00Z", agent="main", evidence="skill_file_read")
+        self._invoke("claude", "a1", "Alpha", "2026-09-01T01:00:00Z", agent="subagent", evidence="slash_skill")
+        self._invoke("opencode", "o1", "Beta", "2026-09-07T01:00:00Z", agent="unknown")
+
+        view = self._collect()["views"]["all"]
+
+        daily = {row["date"]: row for row in view["daily"]}
+        self.assertEqual({"codex": 1}, daily["2026-08-31"]["platforms"])
+        self.assertEqual({"claude": 1}, daily["2026-09-01"]["platforms"])
+        weekly = {row["week"]: row for row in view["weekly"]}
+        self.assertEqual(2, weekly["2026-08-31"]["count"])
+        self.assertEqual(1, weekly["2026-09-07"]["count"])
+        self.assertEqual(3, sum(row["count"] for row in view["weekly_detail"]))
+        monthly = {row["month"]: row for row in view["monthly"]}
+        self.assertEqual({"codex": 1}, monthly["2026-08"]["platforms"])
+        self.assertEqual({"claude": 1, "opencode": 1}, monthly["2026-09"]["platforms"])
+        agents = {row["platform"]: row for row in view["agent_by_platform"]}
+        self.assertEqual(1, agents["codex"]["main"])
+        self.assertEqual(1, agents["claude"]["subagent"])
+        self.assertEqual(1, agents["opencode"]["unknown"])
         self.assertEqual(
-            {"main": 1, "subagent": 1, "unknown": 1}, data["agent_counts"]
+            {"structured_skill": 1, "slash_skill": 1, "skill_file_read": 1},
+            view["evidence_counts"],
         )
-        self.assertEqual("Alpha", data["ranking"][0]["name"])
-        self.assertEqual(3, data["ranking"][0]["calls"])
-        self.assertEqual(3, data["ranking"][0]["active_days"])
-        self.assertEqual("2026-09-07T04:00:00Z", data["ranking"][0]["last_invoked_at"])
-        self.assertEqual(2, data["cwd_counts"][0]["count"])
+        self.assertEqual([{"cwd": "/work", "count": 3}], view["cwd_counts"])
 
-    def test_stale_and_diagnostic_quality_sections(self):
-        self._insert_invocation("old", self.alpha, "2026-07-01T00:00:00Z")
-        connection = sqlite3.connect(self.db_path)
-        try:
-            rows = [
-                ("bad", "invalid_json"),
-                ("encoding", "invalid_encoding"),
-                ("agent", "unknown_agent"),
-                ("scan", "scan_failure"),
-            ]
-            for offset, (detail, category) in enumerate(rows):
-                connection.execute(
-                    "INSERT INTO diagnostics "
-                    "(transcript_path, byte_offset, line_number, event_type, category, detail, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    ("session.jsonl", offset, offset + 1, None, category, detail, "2026-09-07T00:00:00Z"),
-                )
-            connection.commit()
-        finally:
-            connection.close()
+    def test_never_and_stale_are_computed_per_platform_and_skill_key(self):
+        self._install("codex", "alpha", "Alpha", "/codex/alpha")
+        self._install("claude", "alpha", "Alpha", "/claude/alpha")
+        self._install("claude", "old", "Old", "/claude/old")
+        self._invoke("codex", "new", "Alpha", "2026-09-07T01:00:00Z", key="alpha")
+        self._invoke("claude", "old", "Old", "2026-07-01T01:00:00Z", key="old")
+
+        view = self._collect()["views"]["all"]
+
+        self.assertEqual(
+            [("claude", "Alpha")],
+            [(row["platform"], row["name"]) for row in view["never_used"]],
+        )
+        self.assertEqual(
+            [("claude", "Old")],
+            [(row["platform"], row["name"]) for row in view["stale_30_days"]],
+        )
+        self.assertEqual([], self._collect()["views"]["codex"]["never_used"])
+
+    def test_platform_status_and_diagnostics_are_exposed(self):
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.execute(
+                "INSERT INTO diagnostics "
+                "(platform, source_path, byte_offset, category, detail, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("claude", "transcript", 0, "unsupported_version", "v9", "2026-09-07T00:00:00Z"),
+            )
 
         data = self._collect()
 
-        self.assertEqual(["Alpha"], [skill["name"] for skill in data["stale_30_days"]])
-        self.assertEqual(2, data["quality"]["unparsed_events"])
-        self.assertEqual(1, data["quality"]["unknown_agents"])
-        self.assertEqual(1, data["quality"]["scan_failures"])
+        statuses = {row["platform"]: row for row in data["platform_status"]}
+        self.assertEqual("ready", statuses["codex"]["status"])
+        self.assertEqual("2026-09-07T07:00:00Z", statuses["claude"]["last_realtime_at"])
+        self.assertEqual("not_installed", statuses["pi"]["status"])
+        self.assertEqual(1, data["views"]["all"]["quality"]["diagnostics"])
+        self.assertEqual(1, data["views"]["claude"]["quality"]["diagnostics"])
+        self.assertEqual(0, data["views"]["codex"]["quality"]["diagnostics"])
 
-    def test_generated_html_has_static_summary_and_embedded_data(self):
-        self._insert_invocation("one", self.alpha, "2026-09-07T04:00:00Z")
+    def test_missing_platform_status_is_unknown_not_not_installed(self):
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.execute("DELETE FROM platform_status WHERE platform = 'pi'")
+
+        pi = next(row for row in self._collect()["platform_status"] if row["platform"] == "pi")
+
+        self.assertEqual("unknown", pi["status"])
+        self.assertIsNone(pi["updated_at"])
+
+    def test_report_queries_share_one_explicit_read_snapshot(self):
+        statements = []
+        original = scanner.init_db
+
+        def traced(path):
+            connection = original(path)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch("report._refresh_codex_inventory"), mock.patch("report.scanner.init_db", side_effect=traced):
+            report.collect_report_data(self.db_path)
+
+        begin = next(index for index, sql in enumerate(statements) if sql == "BEGIN")
+        selects = [index for index, sql in enumerate(statements) if sql.startswith("SELECT")]
+        self.assertEqual(4, len(selects))
+        self.assertTrue(all(index > begin for index in selects))
+
+    def test_stale_includes_exactly_thirty_days_but_not_one_second_newer(self):
+        self._install("codex", "boundary", "Boundary")
+        self._install("codex", "newer", "Newer")
+        self._invoke("codex", "boundary", "Boundary", "2026-08-08T12:00:00Z", key="boundary")
+        self._invoke("codex", "newer", "Newer", "2026-08-08T12:00:01Z", key="newer")
+
+        stale = self._collect()["views"]["codex"]["stale_30_days"]
+
+        self.assertEqual(["Boundary"], [row["name"] for row in stale])
+
+    def test_generated_html_is_offline_filterable_and_json_safe(self):
+        dangerous = "</script><script>alert(1)</script>"
+        self._invoke("codex", "x", dangerous, "2026-09-07T01:00:00Z")
         output = self.root / "dashboard.html"
 
         result = report.generate_report(
-            db_path=self.db_path,
-            output_path=output,
-            codex_home=self.codex_home,
-            agents_home=self.agents_home,
-            plugin_root=self.plugin_root,
-            now=datetime(2026, 9, 7, 12, tzinfo=timezone.utc),
+            self.db_path, output, now=datetime(2026, 9, 7, 12, tzinfo=timezone.utc),
             local_timezone=timezone.utc,
+            codex_home=self.root / "empty-codex",
+            agents_home=self.root / "empty-agents",
+            plugin_root=self.root / "empty-plugins",
         )
 
-        html = output.read_text(encoding="utf-8")
+        document = output.read_text(encoding="utf-8")
         self.assertEqual(output, result)
-        self.assertIn("日视图", html)
-        self.assertIn("周视图", html)
-        self.assertIn("月视图", html)
-        self.assertIn("从未使用", html)
-        self.assertIn("数据质量", html)
-        self.assertIn("活跃 Skill", html)
-        self.assertIn("环比", html)
-        self.assertIn("item.active_skills", html)
-        self.assertIn("item.change_percent", html)
-        self.assertIn("Alpha", html)
-        payload = html.split('<script id="dashboard-data" type="application/json">', 1)[1]
-        payload = payload.split("</script>", 1)[0]
-        self.assertEqual(1, json.loads(payload)["overview"]["total_calls"])
+        self.assertIn('id="platform-filter"', document)
+        for platform in ("all", *PLATFORMS):
+            self.assertIn(f'value="{platform}"', document)
+        self.assertIn("平台趋势", document)
+        self.assertIn('id="skill-filter"', document)
+        self.assertIn('id="agent-filter"', document)
+        self.assertIn("平台 × 代理", document)
+        self.assertIn("项目目录", document)
+        self.assertIn("活跃天数", document)
+        self.assertIn("item.active_skills", document)
+        self.assertIn("item.change_percent", document)
+        self.assertIn("aria-label", document)
+        self.assertIn("tabIndex", document)
+        self.assertIn("证据分布", document)
+        self.assertIn("平台状态", document)
+        self.assertNotIn("https://", document)
+        self.assertNotIn("http://", document)
+        payload = document.split('<script id="dashboard-data" type="application/json">', 1)[1].split("</script>", 1)[0]
+        decoded = json.loads(payload)
+        self.assertEqual(dangerous, decoded["views"]["all"]["ranking"][0]["name"])
+        self.assertNotIn(dangerous, payload)
+
+    def test_atomic_replace_failure_preserves_existing_report(self):
+        output = self.root / "dashboard.html"
+        output.write_text("old report", encoding="utf-8")
+
+        with mock.patch("report.os.replace", side_effect=OSError("busy")):
+            with self.assertRaises(OSError):
+                report.generate_report(
+                    self.db_path,
+                    output,
+                    codex_home=self.root / "empty-codex",
+                    agents_home=self.root / "empty-agents",
+                    plugin_root=self.root / "empty-plugins",
+                )
+
+        self.assertEqual("old report", output.read_text(encoding="utf-8"))
+        self.assertEqual([], list(self.root.glob(".dashboard.html.*.tmp")))
 
 
 if __name__ == "__main__":
