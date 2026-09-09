@@ -17,6 +17,8 @@ python analytics.py report
 
 报告默认生成到 `data/dashboard.html`。重复执行 `scan-all` 不会重复计数；未安装的平台显示为 `not_installed`，不会阻止其他平台扫描。
 
+报告中的“从未使用”只统计用户可管理的已安装 Skill；Agent 原生 Skill（当前以 `skill_source=system` 标记）会被排除。Skill 排行默认展示前 20 项，可展开全部，并支持按名称模糊搜索；搜索会在当前平台的完整排行中匹配。
+
 自动更新是可选增强，必须显式选择平台：
 
 ```text

@@ -283,7 +283,12 @@ def _build_view(
         )
     ranking.sort(key=lambda item: (-item["calls"], item["name"].casefold()))
 
-    never_used = [_installed_item(row) for row in installed_rows if (row["platform"], row["skill_key"]) not in used_installations]
+    manageable_rows = [row for row in installed_rows if row["skill_source"] != "system"]
+    never_used = [
+        _installed_item(row)
+        for row in manageable_rows
+        if (row["platform"], row["skill_key"]) not in used_installations
+    ]
     never_used.sort(key=lambda row: (row["platform"], row["name"].casefold(), row["key"]))
     local_current = current.astimezone(local_timezone) if local_timezone else current.astimezone()
     stale = []
@@ -334,7 +339,13 @@ def _build_view(
         installed_names = {row["skill_name"].casefold() for row in installed_rows}
         installed_skill_count = len(installed_names)
         used_skill_count = len(per_skill)
-        never_used_skill_count = len(installed_names - per_skill.keys())
+        manageable_names = {row["skill_name"].casefold() for row in manageable_rows}
+        manageable_used_names = {
+            row["skill_name"].casefold()
+            for row in manageable_rows
+            if (row["platform"], row["skill_key"]) in used_installations
+        }
+        never_used_skill_count = len(manageable_names - manageable_used_names)
     else:
         installed_skill_count = len(installed_identities)
         used_skill_count = len(used_installations)

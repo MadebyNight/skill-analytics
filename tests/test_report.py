@@ -204,6 +204,24 @@ class ReportTestCase(unittest.TestCase):
         )
         self.assertEqual([], self._collect()["views"]["codex"]["never_used"])
 
+    def test_never_used_excludes_native_system_skills_only(self):
+        self._install("codex", "native-unused", "Native Unused", source="system")
+        self._install("codex", "user-unused", "User Unused", source="agents")
+        self._install("codex", "native-used", "Native Used", source="system")
+        self._invoke(
+            "codex", "native", "Native Used", "2026-09-07T01:00:00Z",
+            key="native-used",
+        )
+
+        views = self._collect()["views"]
+        view = views["codex"]
+
+        self.assertEqual(1, view["overview"]["never_used_skills"])
+        self.assertEqual(["User Unused"], [row["name"] for row in view["never_used"]])
+        self.assertEqual(["Native Used"], [row["name"] for row in view["ranking"]])
+        self.assertEqual(1, views["all"]["overview"]["never_used_skills"])
+        self.assertEqual(["User Unused"], [row["name"] for row in views["all"]["never_used"]])
+
     def test_platform_status_and_diagnostics_are_exposed(self):
         with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
@@ -283,6 +301,11 @@ class ReportTestCase(unittest.TestCase):
         self.assertIn("平台 × 代理", document)
         self.assertIn("项目目录", document)
         self.assertIn("活跃天数", document)
+        self.assertIn('id="ranking-search"', document)
+        self.assertIn('id="ranking-toggle"', document)
+        self.assertIn('id="ranking-summary"', document)
+        self.assertIn("const RANKING_LIMIT = 20", document)
+        self.assertIn("toLocaleLowerCase", document)
         self.assertIn("item.active_skills", document)
         self.assertIn("item.change_percent", document)
         self.assertIn("aria-label", document)

@@ -35,6 +35,18 @@
     .copy { margin: 0; max-width: 48ch; font-size: 12px; }
     .filter-row { display: flex; gap: 9px; flex-wrap: wrap; }
     .filter-row select { min-width: 150px; }
+    .ranking-tools { display: flex; align-items: center; justify-content: end; gap: 9px; flex-wrap: wrap; }
+    .ranking-tools label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    .ranking-search { position: relative; display: flex; align-items: center; }
+    .ranking-search svg { position: absolute; left: 14px; color: var(--muted); pointer-events: none; }
+    .ranking-tools input { width: min(260px, 100%); padding: 12px 16px 12px 38px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--raised); font: 600 12px inherit; }
+    .ranking-tools input::placeholder { color: var(--muted); }
+    .ranking-tools input:focus-visible, .ranking-tools button:focus-visible { outline: 2px solid var(--acid); outline-offset: 3px; }
+    .ranking-tools button { display: inline-flex; align-items: center; gap: 7px; padding: 12px 15px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--raised); font: 700 11px inherit; cursor: pointer; }
+    .ranking-tools button[hidden] { display: none; }
+    .ranking-tools button:hover { border-color: var(--acid); }
+    .ranking-tools svg { width: 14px; height: 14px; }
+    .ranking-summary { color: var(--muted); font: 10px ui-monospace, monospace; }
     .panel { border: 1px solid var(--line); border-radius: 22px; background: rgba(14,18,25,.86); overflow: hidden; }
     .platform-strip { display: grid; grid-template-columns: repeat(4, 1fr); }
     .platform-card { padding: 24px; border-right: 1px solid var(--line); }
@@ -95,7 +107,7 @@
 
     <section><div class="section-head"><div><div class="index">03 / Attribution</div><h2>平台 × 代理</h2></div><p class="copy">拆分主代理、子代理和未知来源，并对照结构化、slash 与文件读取证据。</p></div><div class="matrix-grid"><div class="panel matrix"><table><thead><tr><th>平台</th><th>Main</th><th>Subagent</th><th>Unknown</th></tr></thead><tbody id="agent-body"></tbody></table></div><div class="panel rows" id="evidence"><div class="index">证据分布</div></div><div class="panel rows" id="cwd"><div class="index">项目目录</div></div></div></section>
 
-    <section><div class="section-head"><div><div class="index">04 / Ranking</div><h2>Skill 排行与平台分布</h2></div></div><div class="panel matrix"><table><thead><tr><th>Skill</th><th>调用</th><th>活跃天数</th><th>平台分布</th><th>最后调用</th></tr></thead><tbody id="ranking-body"></tbody></table></div></section>
+    <section><div class="section-head"><div><div class="index">04 / Ranking</div><h2>Skill 排行与平台分布</h2></div><div class="ranking-tools"><label for="ranking-search">搜索 Skill 排行</label><div class="ranking-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg><input id="ranking-search" type="search" placeholder="搜索 Skill 名称" aria-label="搜索 Skill 排行"></div><span class="ranking-summary" id="ranking-summary" aria-live="polite"></span><button id="ranking-toggle" type="button" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg><span>展开全部</span></button></div></div><div class="panel matrix"><table><thead><tr><th>Skill</th><th>调用</th><th>活跃天数</th><th>平台分布</th><th>最后调用</th></tr></thead><tbody id="ranking-body"></tbody></table></div></section>
 
     <section><div class="section-head"><div><div class="index">05 / Dormancy</div><h2>按平台冷门清单</h2></div></div><div class="cold-grid"><div class="panel"><div class="rows"><strong>从未使用</strong></div><ul class="list" id="never-list"></ul></div><div class="panel"><div class="rows"><strong>30 天未用</strong></div><ul class="list" id="stale-list"></ul></div></div></section>
 
@@ -109,6 +121,8 @@
     const DATA = JSON.parse(document.getElementById('dashboard-data').textContent);
     const NAMES = {codex:'Codex', claude:'Claude Code', opencode:'OpenCode', pi:'Pi'};
     const COLORS = {codex:'var(--codex)', claude:'var(--claude)', opencode:'var(--opencode)', pi:'var(--pi)'};
+    const RANKING_LIMIT = 20;
+    let rankingExpanded = false;
     const create = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
     const empty = text => create('li', 'empty', text);
 
@@ -145,8 +159,17 @@
     }
     function renderRanking(view) {
       const root=document.getElementById('ranking-body');
-      if (!view.ranking.length) { const tr=create('tr'); const td=create('td','empty','还没有可观测的 Skill 调用'); td.colSpan=5; tr.append(td); root.replaceChildren(tr); return; }
-      root.replaceChildren(...view.ranking.map(item => { const tr=create('tr'); const skill=create('td'); skill.append(create('strong','',item.name),create('small','',item.installed?'已安装':'仅历史记录')); const pills=create('td','platform-pills'); Object.entries(item.platforms).forEach(([p,n])=>{ const pill=create('i','',`${NAMES[p]} ${n}`); pill.title=item.installations.filter(row=>row.platform===p).map(row=>row.path||row.key).join('\n')||'仅历史记录'; pills.append(pill); }); tr.append(skill,create('td','number',item.calls),create('td','number',item.active_days),pills,create('td','muted',item.last_invoked_at)); return tr; }));
+      const query=document.getElementById('ranking-search').value.trim().toLocaleLowerCase();
+      const matches=view.ranking.filter(item => item.name.toLocaleLowerCase().includes(query));
+      const visible=query || rankingExpanded ? matches : matches.slice(0,RANKING_LIMIT);
+      const toggle=document.getElementById('ranking-toggle');
+      const summary=document.getElementById('ranking-summary');
+      toggle.hidden=Boolean(query) || matches.length <= RANKING_LIMIT;
+      toggle.setAttribute('aria-expanded',String(rankingExpanded));
+      toggle.querySelector('span').textContent=rankingExpanded ? '收起' : `展开全部 (${Math.max(matches.length-RANKING_LIMIT,0)})`;
+      summary.textContent=matches.length ? `显示 ${visible.length} / ${matches.length}` : '';
+      if (!matches.length) { const tr=create('tr'); const td=create('td','empty',view.ranking.length ? '没有匹配的 Skill' : '还没有可观测的 Skill 调用'); td.colSpan=5; tr.append(td); root.replaceChildren(tr); return; }
+      root.replaceChildren(...visible.map(item => { const tr=create('tr'); const skill=create('td'); skill.append(create('strong','',item.name),create('small','',item.installed?'已安装':'仅历史记录')); const pills=create('td','platform-pills'); Object.entries(item.platforms).forEach(([p,n])=>{ const pill=create('i','',`${NAMES[p]} ${n}`); pill.title=item.installations.filter(row=>row.platform===p).map(row=>row.path||row.key).join('\n')||'仅历史记录'; pills.append(pill); }); tr.append(skill,create('td','number',item.calls),create('td','number',item.active_days),pills,create('td','muted',item.last_invoked_at)); return tr; }));
     }
     function renderList(id, rows, message) { const root=document.getElementById(id); root.replaceChildren(...(rows.length ? rows.map(item => { const li=create('li'); li.append(create('span','badge',NAMES[item.platform]),create('strong','',item.name),create('small','',item.source)); return li; }) : [empty(message)])); }
     function renderStatus(selected, view) {
@@ -154,9 +177,10 @@
       document.getElementById('status-body').replaceChildren(...rows.map(item => { const tr=create('tr',`status-${item.status}`); const platform=create('td'); platform.append(create('span','dot'),document.createTextNode(` ${NAMES[item.platform]}`),create('code','',item.resolved_root||'')); tr.append(platform,create('td','',item.status),create('td','',item.last_history_scan_at||'—'),create('td','',item.last_realtime_at||'—'),create('td','',item.format_version||'—')); return tr; }));
       document.getElementById('quality').textContent=`诊断 ${view.quality.diagnostics} · 无法解析 ${view.quality.unparsed_events} · 未知代理 ${view.quality.unknown_agents} · 扫描失败 ${view.quality.scan_failures}`;
     }
-    function render() { const selected=document.getElementById('platform-filter').value; const view=DATA.views[selected]; populateSkills(view); renderMetrics(view); renderHeatmap(view); renderBars('weekly',filteredWeekly(view),'week'); renderBars('monthly',view.monthly,'month'); renderAgents(view); renderRanking(view); renderList('never-list',view.never_used,'所有已安装 Skill 都有调用记录'); renderList('stale-list',view.stale_30_days,'没有 30 天以上未调用的 Skill'); renderStatus(selected,view); }
+    function render() { const selected=document.getElementById('platform-filter').value; const view=DATA.views[selected]; populateSkills(view); renderMetrics(view); renderHeatmap(view); renderBars('weekly',filteredWeekly(view),'week'); renderBars('monthly',view.monthly,'month'); renderAgents(view); renderRanking(view); renderList('never-list',view.never_used,'所有可管理 Skill 都有调用记录'); renderList('stale-list',view.stale_30_days,'没有 30 天以上未调用的 Skill'); renderStatus(selected,view); }
     function renderWeekly() { const view=DATA.views[document.getElementById('platform-filter').value]; renderBars('weekly',filteredWeekly(view),'week'); }
-    renderFleet(); document.getElementById('platform-filter').addEventListener('change',render); document.getElementById('skill-filter').addEventListener('change',renderWeekly); document.getElementById('agent-filter').addEventListener('change',renderWeekly); render();
+    function resetRanking() { rankingExpanded=false; document.getElementById('ranking-search').value=''; }
+    renderFleet(); document.getElementById('platform-filter').addEventListener('change',() => { resetRanking(); render(); }); document.getElementById('skill-filter').addEventListener('change',renderWeekly); document.getElementById('agent-filter').addEventListener('change',renderWeekly); document.getElementById('ranking-search').addEventListener('input',() => { rankingExpanded=false; renderRanking(DATA.views[document.getElementById('platform-filter').value]); }); document.getElementById('ranking-toggle').addEventListener('click',() => { rankingExpanded=!rankingExpanded; renderRanking(DATA.views[document.getElementById('platform-filter').value]); }); render();
   </script>
 </body>
 </html>
