@@ -1,3 +1,13 @@
 data/
 __pycache__/
 *.py[cod]
+
+# 预览构建产物：仅提交截图，不提交生成的 HTML
+assets/dashboard-preview.html
+.demo-build/
+
+# 与项目无关的本地文档
+configuration.md
+plugins.html
+slim-tool-reference.md
+tool-reference.md

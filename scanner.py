@@ -7,9 +7,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import unquote, urlparse
@@ -18,7 +19,42 @@ from adapters.base import EVIDENCE_PRIORITY, InstalledSkill, Invocation, canonic
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "analytics.db"
+LEGACY_DATA_DIR = PROJECT_ROOT / "data"
+LEGACY_DB_PATH = LEGACY_DATA_DIR / "analytics.db"
+
+
+def _user_data_dir(platform: str | None = None) -> Path:
+    """Return the per-user analytics data directory for the current OS."""
+    override = os.environ.get("SKILL_ANALYTICS_HOME")
+    if override:
+        return Path(override).expanduser()
+    if (platform or os.name) == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        root = Path(base).expanduser() if base else Path.home() / "AppData" / "Local"
+        return root / "skill-analytics"
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base).expanduser() if base else Path.home() / ".local" / "share"
+    return root / "skill-analytics"
+
+
+DATA_DIR = _user_data_dir()
+DEFAULT_DB_PATH = DATA_DIR / "analytics.db"
+
+
+def migrate_legacy_data(legacy_db: str | os.PathLike[str] = LEGACY_DB_PATH) -> bool:
+    """Copy a pre-existing repository-local database to the user data directory once.
+
+    Returns True when a migration happened. Existing user data always wins.
+    """
+    source = Path(legacy_db)
+    if source.resolve() == DEFAULT_DB_PATH.resolve():
+        return False
+    if DEFAULT_DB_PATH.exists() or not source.exists():
+        return False
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, DEFAULT_DB_PATH)
+    return True
+
 
 _READ_COMMAND = re.compile(
     r"(?:^|[;&|\r\n]+)\s*(?:&\s*)?(?:command\s+)?(?:sudo\s+)?"
@@ -233,6 +269,8 @@ def _migrate_legacy_schema(connection: sqlite3.Connection) -> None:
 def init_db(db_path: str | os.PathLike[str] = DEFAULT_DB_PATH) -> sqlite3.Connection:
     """Create or atomically migrate the analytics schema and return a connection."""
     path = Path(db_path)
+    if path.resolve() == DEFAULT_DB_PATH.resolve():
+        migrate_legacy_data()
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=2.0)
     connection.execute("PRAGMA foreign_keys = ON")
@@ -1365,6 +1403,110 @@ def backfill(
     finally:
         connection.close()
     return result
+
+
+def prune_invocations(
+    older_than_days: int,
+    db_path: str | os.PathLike[str] = DEFAULT_DB_PATH,
+    *,
+    apply: bool = False,
+) -> dict[str, int]:
+    """Delete Skill invocations older than N days. Reports before deleting."""
+    if older_than_days < 0:
+        raise ValueError("older_than_days must not be negative")
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=older_than_days)
+    ).isoformat().replace("+00:00", "Z")
+    connection = init_db(db_path)
+    try:
+        total = int(connection.execute("SELECT COUNT(*) FROM invocations").fetchone()[0])
+        matched = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM invocations WHERE invoked_at < ?", (cutoff,)
+            ).fetchone()[0]
+        )
+        deleted = 0
+        if apply and matched:
+            connection.execute("DELETE FROM invocations WHERE invoked_at < ?", (cutoff,))
+            connection.commit()
+            deleted = matched
+        return {
+            "matched": matched,
+            "deleted": deleted,
+            "remaining": total - deleted,
+            "cutoff": cutoff,
+        }
+    finally:
+        connection.close()
+
+
+def prune_diagnostics(
+    db_path: str | os.PathLike[str] = DEFAULT_DB_PATH,
+    *,
+    apply: bool = False,
+) -> dict[str, int]:
+    """Delete diagnostic rows. These are for troubleshooting only, not statistics."""
+    connection = init_db(db_path)
+    try:
+        total = int(connection.execute("SELECT COUNT(*) FROM diagnostics").fetchone()[0])
+        deleted = 0
+        if apply and total:
+            connection.execute("DELETE FROM diagnostics")
+            connection.commit()
+            deleted = total
+        return {"matched": total, "deleted": deleted, "remaining": total - deleted}
+    finally:
+        connection.close()
+
+
+def prune_dead_scan_state(
+    db_path: str | os.PathLike[str] = DEFAULT_DB_PATH,
+    *,
+    apply: bool = False,
+) -> dict[str, int]:
+    """Drop scan cursors whose source transcript no longer exists."""
+    connection = init_db(db_path)
+    try:
+        rows = connection.execute(
+            "SELECT platform, source_path FROM scan_state"
+        ).fetchall()
+        dead = [
+            (platform, source_path)
+            for platform, source_path in rows
+            if not Path(source_path).exists()
+        ]
+        deleted = 0
+        if apply and dead:
+            connection.executemany(
+                "DELETE FROM scan_state WHERE platform = ? AND source_path = ?", dead
+            )
+            connection.commit()
+            deleted = len(dead)
+        return {
+            "matched": len(dead),
+            "deleted": deleted,
+            "remaining": len(rows) - deleted,
+        }
+    finally:
+        connection.close()
+
+
+def compact_database(db_path: str | os.PathLike[str] = DEFAULT_DB_PATH) -> dict[str, int]:
+    """Reclaim disk space left behind by deleted rows."""
+    path = Path(db_path)
+    before = path.stat().st_size if path.exists() else 0
+    connection = sqlite3.connect(path, timeout=30.0)
+    try:
+        connection.execute("VACUUM")
+    finally:
+        connection.close()
+    after = path.stat().st_size if path.exists() else 0
+    return {"before_bytes": before, "after_bytes": after, "reclaimed_bytes": before - after}
+
+
+def database_size(db_path: str | os.PathLike[str] = DEFAULT_DB_PATH) -> int:
+    path = Path(db_path)
+    return path.stat().st_size if path.exists() else 0
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -60,6 +60,26 @@ def _parser() -> argparse.ArgumentParser:
         "record", parents=[common], help="record one realtime event from stdin"
     )
     record.add_argument("--platform", choices=("claude", "opencode", "pi"), required=True)
+
+    prune = subparsers.add_parser(
+        "prune", parents=[common], help="delete old rows; dry-run unless --yes is given"
+    )
+    prune.add_argument(
+        "--older-than", type=int, metavar="DAYS",
+        help="delete invocations older than DAYS; omit to leave invocations alone",
+    )
+    prune.add_argument(
+        "--diagnostics-only", action="store_true",
+        help="delete only diagnostic rows instead of invocation history",
+    )
+    prune.add_argument(
+        "--yes", action="store_true",
+        help="actually delete; without it prune only reports what it would do",
+    )
+    subparsers.add_parser(
+        "compact", parents=[common],
+        help="reclaim disk space left behind by deleted rows",
+    )
     return parser
 
 
@@ -409,8 +429,45 @@ def _install(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _prune(args: argparse.Namespace) -> int:
+    if args.older_than is None and not args.diagnostics_only:
+        print(json.dumps({
+            "command": "prune",
+            "error": "nothing_selected",
+            "hint": "pass --older-than DAYS, --diagnostics-only, or both",
+        }, ensure_ascii=False))
+        return 2
+
+    apply = bool(args.yes)
+    output: dict[str, Any] = {"command": "prune", "applied": apply}
+    if args.diagnostics_only:
+        output["diagnostics"] = scanner.prune_diagnostics(args.db, apply=apply)
+    if args.older_than is not None:
+        output["invocations"] = scanner.prune_invocations(
+            args.older_than, args.db, apply=apply
+        )
+    output["dead_scan_state"] = scanner.prune_dead_scan_state(args.db, apply=apply)
+    output["size_bytes"] = scanner.database_size(args.db)
+    if not apply:
+        output["hint"] = "no data was deleted; re-run with --yes to apply"
+    else:
+        output["hint"] = "run 'python analytics.py compact' to release disk space"
+    print(json.dumps(output, ensure_ascii=False))
+    return 0
+
+
+def _compact(args: argparse.Namespace) -> int:
+    result = scanner.compact_database(args.db)
+    print(json.dumps({"command": "compact", **result}, ensure_ascii=False))
+    return 0
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "prune":
+        return _prune(args)
+    if args.command == "compact":
+        return _compact(args)
     if args.command == "scan-all":
         return _scan(args, PLATFORMS)
     if args.command == "scan":

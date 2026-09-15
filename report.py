@@ -19,8 +19,8 @@ from adapters.codex import CodexAdapter
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "analytics.db"
-DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "data" / "dashboard.html"
+DEFAULT_DB_PATH = scanner.DEFAULT_DB_PATH
+DEFAULT_OUTPUT_PATH = scanner.DATA_DIR / "dashboard.html"
 DEFAULT_TEMPLATE_PATH = PROJECT_ROOT / "templates" / "dashboard.html"
 PLATFORMS = ("codex", "claude", "opencode", "pi")
 VIEW_NAMES = ("all", *PLATFORMS)

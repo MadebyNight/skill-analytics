@@ -2,7 +2,21 @@
 
 本工具在本机汇总 Codex、Claude Code、OpenCode 和 Pi coding agent 的 Skill 调用，写入 SQLite，并生成可离线打开的统一 HTML 仪表盘。支持 Windows、macOS 和 Linux，只使用 Python 标准库，不需要第三方 Python 包、常驻服务或中心服务器。
 
-所有统计默认只保存在当前仓库的 `data/`，不会上传、同步或共享会话数据。
+所有统计默认只保存在当前用户的数据目录，不会上传、同步或共享会话数据。
+
+![Skill Signal 仪表盘](assets/dashboard-preview.png)
+
+仪表盘为单个自包含 HTML 文件，可离线打开，不含 CDN 或远程资源。图中为脱敏的演示数据。
+
+## 交给 Agent 安装
+
+仓库自带 `skills/skill-analytics/`，是一个遵循 Agent Skills 规范的技能包。可以让 Agent 读取本仓库地址后自行完成安装，无需手工改配置：
+
+```text
+阅读 <repository-url> 中的 skills/skill-analytics/SKILL.md，按其中的步骤为我安装
+```
+
+Agent 会按 `SKILL.md` 与 `references/install.md` 判断当前平台、调用下面的安装器、提示宿主信任步骤，并用 `status` 验证。安装细节和各平台差异见 [安装参考](skills/skill-analytics/references/install.md)。
 
 ## 最小流程
 
@@ -15,7 +29,9 @@ python analytics.py scan-all
 python analytics.py report
 ```
 
-报告默认生成到 `data/dashboard.html`。重复执行 `scan-all` 不会重复计数；未安装的平台显示为 `not_installed`，不会阻止其他平台扫描。
+数据库和报告默认写入当前用户的数据目录：Windows 为 `%LOCALAPPDATA%\skill-analytics\`，macOS 和 Linux 为 `$XDG_DATA_HOME/skill-analytics/`（或 `~/.local/share/skill-analytics/`）。可用 `SKILL_ANALYTICS_HOME` 覆盖。旧版本留在仓库 `data/` 下的数据库会在首次访问时复制过去一次，原文件保留。
+
+重复执行 `scan-all` 不会重复计数；未安装的平台显示为 `not_installed`，不会阻止其他平台扫描。
 
 报告中的“从未使用”只统计用户可管理的已安装 Skill；Agent 原生 Skill（当前以 `skill_source=system` 标记）会被排除。Skill 排行默认展示前 20 项，可展开全部，并支持按名称模糊搜索；搜索会在当前平台的完整排行中匹配。
 
@@ -25,6 +41,8 @@ python analytics.py report
 python analytics.py install --platform codex --platform claude
 python analytics.py install --platform opencode --platform pi
 ```
+
+安装器会先备份再修改配置，重复安装字节不变，并且只删除自己写入的内容。已安装的 Hook 会记录本仓库和 Python 解释器的绝对路径，因此检出位置需要保持固定；移动或重命名仓库后应先卸载再从新位置安装。
 
 Codex 安装后须在 `/hooks` 中检查并信任 Hook；Claude Code 仍受 workspace trust 约束。安装器不会绕过宿主信任机制。
 
@@ -48,6 +66,8 @@ python analytics.py report
 python analytics.py status
 python analytics.py install --platform <name> [--platform ...]
 python analytics.py uninstall --platform <name> [--platform ...]
+python analytics.py prune [--older-than <天数>] [--diagnostics-only] [--yes]
+python analytics.py compact
 ```
 
 - `scan-all` 扫描四个平台；单个平台缺失或失败时继续处理其余平台。
@@ -55,6 +75,8 @@ python analytics.py uninstall --platform <name> [--platform ...]
 - `report` 生成自包含、无需 CDN 的仪表盘。
 - `status` 显示解析路径、扫描/实时更新时间、格式诊断和集成状态。
 - `install`、`uninstall` 只处理显式平台；不带 `--platform` 会拒绝执行。
+- `prune` 清理历史数据，默认只预览不删除；详见[历史数据清理](#历史数据清理)。
+- `compact` 回收已删除数据占用的磁盘空间。
 
 所有统一命令都支持以下路径覆盖项，参数应放在子命令之后：
 
@@ -101,7 +123,7 @@ python install_hook.py uninstall
 | OpenCode | `OPENCODE_CONFIG_DIR`，否则 `~/.config/opencode` | 由 `--opencode-command` 的公共 CLI 导出；全局/项目 `.opencode/skills` 及兼容的 `.claude/skills`、`.agents/skills` |
 | Pi | `PI_CODING_AGENT_DIR`，否则 `~/.pi/agent` | session 优先级：CLI → `PI_CODING_AGENT_SESSION_DIR` → `settings.json:sessionDir` → `sessions`；用户/项目及显式 Skill 路径 |
 
-数据库和报告默认分别为 `<仓库>/data/analytics.db`、`<仓库>/data/dashboard.html`，可用 `--db`、`--output` 覆盖。
+数据库和报告默认位于用户数据目录下的 `analytics.db` 与 `dashboard.html`，可用 `--db`、`--output` 覆盖。
 
 ## 自动集成、备份与卸载
 
@@ -155,11 +177,57 @@ OpenCode 失败时确认 `--opencode-command` 可执行；扫描器不会读取�
 
 官方页面存在不等于历史内部字段都有兼容承诺，因此实现坚持公共接口优先、未知格式隔离，不把当前内部结构写成长期保证。
 
+## 历史数据清理
+
+数据库默认位于用户数据目录，长期使用会缓慢增长。实测约 1300 条调用记录对应 3.4 MB，日常使用多年也通常只有几十 MB，不是必须定期清理的空间占用。
+
+`dashboard.html` 每次生成都会整体覆盖，不随历史累积。真正需要留意的是诊断记录：解析失败时会逐条写入，遇到宿主会话格式变更可能明显增长。
+
+清理是显式操作，不会自动执行，也不会自动删除任何历史。三个命令各司其职：
+
+```text
+python analytics.py prune --older-than 90      # 预览：将删除 90 天前的调用记录
+python analytics.py prune --older-than 90 --yes # 实际删除
+python analytics.py prune --diagnostics-only --yes  # 只清诊断记录
+python analytics.py compact                     # 真正释放磁盘空间
+```
+
+### 先预览，再删除
+
+`prune` 不加 `--yes` 时只打印将删除多少行，不修改数据库：
+
+```text
+python analytics.py prune --older-than 180
+```
+
+输出含 `matched`（匹配行数）、`deleted`（实际删除，预览时恒为 0）和 `hint`。确认无误后再加 `--yes`。
+
+### 删除与回收空间是两步
+
+SQLite 删除行后文件不会自动缩小，磁盘空间仍被占用。因此 `prune --yes` 之后需要执行：
+
+```text
+python analytics.py compact
+```
+
+`compact` 会重建数据库并返回 `reclaimed_bytes`。数据量大时可能耗时数秒，期间不要中断。
+
+### 清理范围与安全边界
+
+- `prune --older-than <天数>` 只删除该天数之前的**调用记录**。
+- `--diagnostics-only` 只删除诊断记录，不影响任何统计数字。
+- **`installed_skills` 永不删除**：它记录已安装 Skill，否则“从未使用”会算错。
+- 两个选项可同时使用，一次删除调用记录和诊断记录。
+- 不带任何选择条件时 `prune` 会拒绝执行并返回 `nothing_selected`，避免误删全库。
+- 清理同时会移除指向已不存在会话文件的扫描游标。
+
+清理只会让历史变短，不会影响仍在保留范围内的统计口径。若不确定，先只跑预览，或先备份数据库文件。
+
 ## 数据与隐私
 
 SQLite 记录平台、会话/回合标识、Skill 名称与可用路径、证据类型、调用时间、工作目录、代理分类、模型和采集来源；不保存提示词、助手正文、工具输出、完整 shell 命令、Skill 内容、令牌或认证文件。
 
-统计、诊断、错误日志和 HTML 默认只在本机 `data/`。工具不含上传、遥测、团队汇总或云同步；HTML 自包含，不加载 CDN 或远程资源。
+统计、诊断、错误日志和 HTML 默认只保存在本机用户数据目录。工具不含上传、遥测、团队汇总或云同步；HTML 自包含，不加载 CDN 或远程资源。
 
 ## 测试
 
@@ -169,4 +237,3 @@ python -m unittest discover -s tests -v
 
 测试使用脱敏 fixture、临时数据库和临时用户目录。端到端验收执行 `scan-all → 重复 scan-all → report → install → 模拟实时事件 → report → uninstall`，mock OpenCode 外部 CLI，并由 `TemporaryDirectory` 自动清理测试产物，不接触真实 home/config。
 
-完整架构与成功标准见 [多平台设计文档](docs/superpowers/specs/2026-09-08-multi-platform-skill-analytics-design.md)。

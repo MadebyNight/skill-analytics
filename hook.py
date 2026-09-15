@@ -13,7 +13,7 @@ import scanner
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_ERROR_LOG = PROJECT_ROOT / "data" / "errors.log"
+DEFAULT_ERROR_LOG = scanner.DATA_DIR / "errors.log"
 
 
 def _generate_report(
